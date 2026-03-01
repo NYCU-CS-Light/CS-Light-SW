@@ -31,9 +31,9 @@ const handlePlayPause = () => {
       </div>
 
       <!-- Right Panel -->
-      <div class="w-80 flex-none h-full border-l bg-white">
+      <!-- <div class="w-80 flex-none h-full border-l bg-white">
         <ParameterPanel />
-      </div>
+      </div> -->
     </div>
   </div>
 </template>
