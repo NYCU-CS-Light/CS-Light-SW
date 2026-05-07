@@ -44,6 +44,20 @@ const PALETTES = {
     { name: '95%',  hex: '#e8e8e8' },
     { name: '100%', hex: '#ffffff' },
   ],
+  // ROYGBIV + white, tuned for what a real RGB LED actually emits. Each swatch
+  // uses primaries only (no muddying mid-tones), so when the firmware's
+  // calibration LUT scales the channels, the on-device color reads cleanly as
+  // the named hue rather than as a wash of all three channels.
+  realworld: [
+    { name: 'Red',    hex: '#ff0000' },
+    { name: 'Orange', hex: '#ff7000' },
+    { name: 'Yellow', hex: '#ffff00' },
+    { name: 'Green',  hex: '#00ff00' },
+    { name: 'Blue',   hex: '#0000ff' },
+    { name: 'Indigo', hex: '#3000ff' },
+    { name: 'Purple', hex: '#a000ff' },
+    { name: 'White',  hex: '#ffffff' },
+  ],
 };
 
 // ============ COMMANDS ============
@@ -225,6 +239,40 @@ function loadCalibration() {
   } catch { return CAL_DEFAULTS; }
 }
 
+// ---- Custom palette (user-editable, persisted) ----
+const CUSTOM_PALETTE_LS_KEY = 'lightseq.customPalette.v1';
+const CUSTOM_PALETTE_DEFAULT = PALETTES.chromatic.map(c => ({ ...c }));
+
+function loadCustomPalette() {
+  try {
+    const raw = localStorage.getItem(CUSTOM_PALETTE_LS_KEY);
+    if (!raw) return CUSTOM_PALETTE_DEFAULT;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length !== 8) return CUSTOM_PALETTE_DEFAULT;
+    return parsed.map((c, i) => ({
+      name: typeof c?.name === 'string' ? c.name : CUSTOM_PALETTE_DEFAULT[i].name,
+      hex:  /^#[0-9a-fA-F]{6}$/.test(c?.hex) ? c.hex : CUSTOM_PALETTE_DEFAULT[i].hex,
+    }));
+  } catch { return CUSTOM_PALETTE_DEFAULT; }
+}
+
+function useCustomPalette() {
+  const { useState, useCallback } = React;
+  const [pal, setPalState] = useState(() => loadCustomPalette());
+  const setSwatch = useCallback((index, hex) => {
+    setPalState(prev => {
+      const next = prev.map((c, i) => i === index ? { ...c, hex } : c);
+      try { localStorage.setItem(CUSTOM_PALETTE_LS_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  }, []);
+  const resetPalette = useCallback(() => {
+    try { localStorage.removeItem(CUSTOM_PALETTE_LS_KEY); } catch {}
+    setPalState(CUSTOM_PALETTE_DEFAULT);
+  }, []);
+  return [pal, setSwatch, resetPalette];
+}
+
 function useCalibration() {
   const { useState, useCallback } = React;
   const [cal, setCalState] = useState(() => loadCalibration());
@@ -400,6 +448,7 @@ function loadCalibrationTestPattern({ setBalls, setSteps, setBpm }) {
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [cal, setCal, resetCal] = useCalibration();
+  const [customPalette, setCustomSwatch, resetCustomPalette] = useCustomPalette();
   const [balls, setBalls] = useState(initialBalls);
   const [steps, setSteps] = useState(seedSteps);
   const [selectedColor, setSelectedColor] = useState(0);
@@ -417,7 +466,9 @@ function App() {
   const [restartTick, setRestartTick] = useState(0); // bumped when Restart clip is hit, retriggers audio
   const [tool, setTool] = useState('paint');
 
-  const palette = PALETTES[t.paletteMode] || PALETTES.chromatic;
+  const palette = t.paletteMode === 'custom'
+    ? customPalette
+    : (PALETTES[t.paletteMode] || PALETTES.chromatic);
   const [stepW, setStepW] = useState(22);
   const [scrollLeft, setScrollLeft] = useState(0);
   const gridSubdiv = { '1/2': 2, '1/4': 4, '1/8': 8, '1/16': 16, '1/32': 32, '1/64': 64 }[t.gridRes] || 16;
@@ -1025,9 +1076,25 @@ function App() {
       if (!mod && e.key === 'p') setTool('paint');
       if (!mod && e.key === 'e') setTool('erase');
       if (!mod && e.key === 's') setTool('select');
+      if (!mod && e.key === '`') {
+        e.preventDefault();
+        // Toggle TweaksPanel via the host protocol it already listens for.
+        // Local flag tracks open/closed since the panel owns its own state.
+        window.__tweaksOpen = !window.__tweaksOpen;
+        window.postMessage({
+          type: window.__tweaksOpen ? '__activate_edit_mode' : '__deactivate_edit_mode',
+        }, '*');
+      }
+    };
+    const onMsg = (e) => {
+      if (e?.data?.type === '__edit_mode_dismissed') window.__tweaksOpen = false;
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('message', onMsg);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('message', onMsg);
+    };
   }, [selectedStepId, selectedIds, deleteStep, deleteStepById, copySelected, pasteClipboard]);
 
   return (
@@ -1152,8 +1219,17 @@ function App() {
         </TweakSection>
         <TweakSection title="Style">
           <TweakRadio label="Palette" value={t.paletteMode}
-            options={[{value:'chromatic',label:'Chroma'},{value:'pastel',label:'Pastel'},{value:'mono',label:'Mono'}]}
+            options={[{value:'chromatic',label:'Chroma'},{value:'pastel',label:'Pastel'},{value:'mono',label:'Mono'},{value:'realworld',label:'Real'},{value:'custom',label:'Custom'}]}
             onChange={v => setTweak('paletteMode', v)} />
+          {t.paletteMode === 'custom' && (
+            <>
+              {customPalette.map((c, i) => (
+                <TweakColor key={i} label={`Swatch ${i + 1}`} value={c.hex}
+                  onChange={(hex) => setCustomSwatch(i, hex)} />
+              ))}
+              <TweakButton label="Reset palette" onClick={resetCustomPalette} secondary />
+            </>
+          )}
           <TweakRadio label="Theme" value={t.theme}
             options={[{value:'dark',label:'Dark'},{value:'light',label:'Light'}]}
             onChange={v => setTweak('theme', v)} />
