@@ -7,7 +7,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "previewLayout": "line",
   "showFade": true,
   "theme": "dark",
-  "paletteMode": "chromatic",
+  "paletteMode": "realworld",
   "ballGlow": 0.85,
   "waveStyle": "wave"
 }/*EDITMODE-END*/;
@@ -74,6 +74,12 @@ const COMMANDS = [
   { id: 'restart',  name: 'Restart',  icon: '↻', desc: 'Wait for button press, then restart from the beginning', fwType: 5 },
   { id: 'rainbow',  name: 'Rainbow',  icon: '◑', desc: 'Cycle hues (macro)',       fwType: null },
 ];
+
+function defaultRateFor(cmdId) {
+  if (cmdId === 'blink') return 8;
+  if (cmdId === 'breathe' || cmdId === 'pingpong') return 4;
+  return 1;
+}
 
 // ============ INITIAL DATA ============
 const initialBalls = [
@@ -622,34 +628,53 @@ function App() {
     });
   }, []);
 
-  // Move a clip across tracks (e.g. drag from B1-A → B2-B). Caller has already
-  // computed the desired { start, length } for the target lane and confirmed
-  // it doesn't collide with anything in there. Returns true if applied.
+  // Move a clip across tracks (e.g. drag from B1-A → B2-B). Overlap with
+  // clips in the target lane is allowed (visually warned downstream). The
+  // `fromTrack` arg is treated as a hint — we always auto-locate the clip by
+  // id so a stale hint (fast drags can outrun React's effect re-registration)
+  // never silently no-ops.
   const moveStepToTrack = useCallback((id, fromTrack, toTrack, patch) => {
-    if (fromTrack === toTrack) {
-      // Same lane — just patch in place.
-      if (patch) updateStep(id, patch);
-      return true;
-    }
     setSteps(prev => {
-      const fromArr = prev[fromTrack] || [];
-      const clip = fromArr.find(s => s.id === id);
-      if (!clip) return prev;
+      let actualFrom = (prev[fromTrack] && prev[fromTrack].some(s => s.id === id)) ? fromTrack : null;
+      if (!actualFrom) {
+        for (const k in prev) {
+          if ((prev[k] || []).some(s => s.id === id)) { actualFrom = k; break; }
+        }
+      }
+      if (!actualFrom) return prev;
+      if (actualFrom === toTrack) {
+        const arr = prev[toTrack].map(s => s.id === id ? { ...s, ...(patch || {}) } : s);
+        return { ...prev, [toTrack]: arr };
+      }
+      const clip = prev[actualFrom].find(s => s.id === id);
       const merged = { ...clip, ...(patch || {}) };
-      const toArr = (prev[toTrack] || []).filter(s => s.id !== id);
-      // Reject if the new position collides with anything in the target lane.
-      const collides = toArr.some(s =>
-        merged.start < s.start + s.length && merged.start + merged.length > s.start
-      );
-      if (collides) return prev;
       return {
         ...prev,
-        [fromTrack]: fromArr.filter(s => s.id !== id),
-        [toTrack]: [...toArr, merged],
+        [actualFrom]: prev[actualFrom].filter(s => s.id !== id),
+        [toTrack]: [...(prev[toTrack] || []).filter(s => s.id !== id), merged],
       };
     });
     return true;
-  }, [updateStep]);
+  }, []);
+
+  // Bulk re-place a group of clips for cross-track multi-clip drag. Each member
+  // returns to its drag-start clip data, then is repositioned by `dStart` on
+  // the time axis and `rdTracks` on the track axis. Done in one setSteps so
+  // the timeline doesn't flicker through intermediate states each frame.
+  const bulkMoveGroup = useCallback((group, dStart, rdTracks, trackOrder) => {
+    setSteps(prev => {
+      const ids = new Set(group.map(m => m.id));
+      const out = {};
+      for (const k in prev) out[k] = prev[k].filter(s => !ids.has(s.id));
+      for (const m of group) {
+        const targetTrack = trackOrder[m.origTrackIdx + rdTracks];
+        if (!targetTrack) continue;
+        if (!out[targetTrack]) out[targetTrack] = [];
+        out[targetTrack] = [...out[targetTrack], { ...m.clip, start: m.origStart + dStart }];
+      }
+      return out;
+    });
+  }, []);
 
   const deleteStep = useCallback((id) => {
     setSteps(prev => {
@@ -666,17 +691,14 @@ function App() {
   }, []);
 
   const onPaint = useCallback((trackKey, startStep) => {
-    const cmd = COMMANDS.find(c => c.id === selectedCommand);
     const desiredLen = STEPS_PER_BAR / gridSubdiv;
     setSteps(prev => {
       const arr = prev[trackKey] || [];
-      // Find next clip starting after startStep — clip new length to fit before it
-      const after = arr.filter(s => s.start >= startStep).sort((a,b) => a.start - b.start)[0];
-      const maxEnd = after ? after.start : TOTAL_STEPS;
-      const length = Math.max(0, Math.min(desiredLen, maxEnd - startStep));
-      // Reject if overlapping a clip that contains startStep, OR no room
-      const containing = arr.find(s => startStep >= s.start && startStep < s.start + s.length);
-      if (containing || length <= 0) return prev;
+      // Overlap is allowed (just visually warned). Only dedupe exact same-start
+      // so drag-painting doesn't stack a tower of clips on one cell.
+      if (arr.some(s => s.start === startStep)) return prev;
+      const length = Math.max(0, Math.min(desiredLen, TOTAL_STEPS - startStep));
+      if (length <= 0) return prev;
       const newStep = {
         id: cryptoId(),
         start: startStep,
@@ -685,7 +707,7 @@ function App() {
         color: palette[selectedColor].hex,
         colorB: palette[(selectedColor + 4) % palette.length].hex,
         brightness: 1,
-        rate: cmd && cmd.id === 'blink' ? 8 : (cmd && (cmd.id === 'breathe' || cmd.id === 'pingpong') ? 4 : 1),
+        rate: defaultRateFor(selectedCommand),
       };
       setSelectedStepId(newStep.id);
       return { ...prev, [trackKey]: [...arr, newStep] };
@@ -733,27 +755,21 @@ function App() {
     });
   }, [selectedIds, selectedStepId]);
 
-  // Paste clipboard at playhead. Each clip lands in its original track at playhead+offset,
-  // clamped against existing clips in that lane (no overlap).
+  // Paste clipboard at playhead. Each clip lands in its original track at playhead+offset.
+  // Overlap with existing clips is allowed (visually warned downstream).
   const pasteClipboard = useCallback(() => {
     if (!clipboard || !clipboard.clips.length) return;
     setSteps(prev => {
       const out = { ...prev };
       const newIds = [];
       const anchor = Math.round(playhead);
-      // Process in order so earlier clips reserve their lane span before later ones in same lane.
       const sorted = [...clipboard.clips].sort((a, b) => a.offset - b.offset);
       for (const c of sorted) {
         if (!out[c.trackKey]) continue; // track may have been removed
         const arr = out[c.trackKey];
         const startStep = anchor + c.offset;
         if (startStep >= TOTAL_STEPS) continue;
-        // Reject if startStep falls inside an existing clip
-        const containing = arr.find(s => startStep >= s.start && startStep < s.start + s.length);
-        if (containing) continue;
-        const after = arr.filter(s => s.start >= startStep).sort((a, b) => a.start - b.start)[0];
-        const maxEnd = after ? after.start : TOTAL_STEPS;
-        const length = Math.max(0, Math.min(c.length, maxEnd - startStep));
+        const length = Math.max(0, Math.min(c.length, TOTAL_STEPS - startStep));
         if (length <= 0) continue;
         const id = cryptoId();
         newIds.push(id);
@@ -839,6 +855,29 @@ function App() {
   }, [setTweak]);
 
   const exportTxt = useCallback(() => {
+    // Refuse to export if any track has overlapping clips. The firmware plays
+    // commands sequentially per LED, so overlap in the editor would silently
+    // export as back-to-back rows with timing that doesn't match the layout.
+    const overlapTracks = [];
+    for (const k in steps) {
+      const arr = steps[k];
+      for (let i = 0; i < arr.length; i++) {
+        for (let j = i + 1; j < arr.length; j++) {
+          const a = arr[i], b = arr[j];
+          if (a.start < b.start + b.length && a.start + a.length > b.start) {
+            overlapTracks.push(k);
+            i = arr.length; break; // one report per track is enough
+          }
+        }
+      }
+    }
+    if (overlapTracks.length) {
+      alert('Cannot export: overlapping clips on ' + overlapTracks.length +
+        ' track(s) — ' + [...new Set(overlapTracks)].join(', ') +
+        '.\n\nFix the clips marked with the red ⚠ OVERLAP stripe and try again.');
+      return;
+    }
+
     // Convert hex -> [r,g,b]
     const hex2rgb = (h) => {
       const x = h.replace('#', '');
@@ -1160,6 +1199,7 @@ function App() {
             onErase={onEraseAt}
             updateStep={updateStep}
             moveStepToTrack={moveStepToTrack}
+            bulkMoveGroup={bulkMoveGroup}
             deleteStepById={deleteStepById}
             totalBars={TOTAL_BARS}
             totalSteps={TOTAL_STEPS}
@@ -1584,7 +1624,7 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
+function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
@@ -1621,10 +1661,13 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
     } else if (tool === 'erase') {
       onErase(trackKey, xToStep(x));
     } else if (tool === 'select') {
-      // start marquee
-      const gridRect = gridRef.current.getBoundingClientRect();
-      const mx = e.clientX - gridRect.left;
-      const my = e.clientY - gridRect.top;
+      // Marquee coords are stored in .tl-grid content space — convert from
+      // viewport by adding the timeline's scroll offset and subtracting the
+      // sticky ruler that sits above the grid.
+      const el = gridRef.current;
+      const gridRect = el.getBoundingClientRect();
+      const mx = e.clientX - gridRect.left + el.scrollLeft;
+      const my = e.clientY - gridRect.top + el.scrollTop - RULER_H;
       setMarquee({ x0: mx, y0: my, x1: mx, y1: my });
       if (!e.shiftKey) {
         setSelectedIds(new Set());
@@ -1651,49 +1694,56 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
     window.addEventListener('mouseup', onUp);
   };
 
-  // resize/move with overlap clamp
+  // resize/move. Overlap with neighbours is allowed (visually warned).
   useEffect(() => {
     if (!drag) return;
     document.body.classList.add('dragging');
     const onMove = (e) => {
       const dxSteps = (e.clientX - drag.startX) / STEP_W;
-      const snapped = Math.round(dxSteps / subdivStep) * subdivStep;
+      // Snap-to-grid uses the absolute target position (not origStart + delta)
+      // so a clip placed at a finer resolution lands on the current grid as
+      // soon as it's moved, instead of preserving its old sub-step offset.
+      const snapAbs = (v) => Math.round(v / subdivStep) * subdivStep;
       if (drag.mode === 'move') {
-        let ns = Math.max(0, Math.min(TOTAL_STEPS - drag.origLength, drag.origStart + snapped));
-
-        // Determine target track from cursor Y (allow drag across LEDs/balls).
-        let targetTrack = drag.trackKey;
+        // Cursor's current track index (used for both single and group drag).
+        let cursorTrackIdx = drag.origTrackIdx;
         if (gridRef.current) {
           const gridRect = gridRef.current.getBoundingClientRect();
-          // Account for sticky ruler and current scroll inside the timeline container.
           const yInGrid = e.clientY - gridRect.top - RULER_H + (gridRef.current.scrollTop || 0);
-          const idx = Math.max(0, Math.min(trackOrder.length - 1, Math.floor(yInGrid / ROW_H)));
-          targetTrack = trackOrder[idx] || drag.trackKey;
+          cursorTrackIdx = Math.max(0, Math.min(trackOrder.length - 1, Math.floor(yInGrid / ROW_H)));
         }
 
-        // Clamp horizontally against neighbours in TARGET track (skip self).
-        const tArr = (steps[targetTrack] || []).filter(s => s.id !== drag.stepId);
-        const before = tArr.filter(s => s.start + s.length <= ns).sort((a,b) => (b.start+b.length)-(a.start+a.length))[0];
-        const after = tArr.filter(s => s.start >= ns + drag.origLength).sort((a,b) => a.start - b.start)[0];
-        const minS = before ? before.start + before.length : 0;
-        const maxS = after ? after.start - drag.origLength : TOTAL_STEPS - drag.origLength;
-        // If the natural slot doesn't fit at all in the target lane, fall back
-        // to current track to avoid ejecting the clip into a colliding spot.
-        if (minS > maxS) return;
-        ns = Math.max(minS, Math.min(maxS, ns));
-
-        if (targetTrack !== drag.trackKey) {
-          // Cross-lane drop: move clip and update drag's notion of its lane.
-          moveStepToTrack(drag.stepId, drag.trackKey, targetTrack, { start: ns });
-          setDrag(d => d ? { ...d, trackKey: targetTrack } : d);
-        } else {
-          updateStep(drag.stepId, { start: ns });
+        if (drag.group) {
+          // Group drag: shift every member by the same time delta and the same
+          // row delta so the whole selection translates together.
+          const primaryNs = snapAbs(drag.origStart + dxSteps);
+          let d = primaryNs - drag.origStart;
+          for (const m of drag.group) {
+            d = Math.max(-m.origStart, Math.min(TOTAL_STEPS - m.origLength - m.origStart, d));
+          }
+          let rd = cursorTrackIdx - drag.origTrackIdx;
+          let minRd = -Infinity, maxRd = Infinity;
+          for (const m of drag.group) {
+            minRd = Math.max(minRd, -m.origTrackIdx);
+            maxRd = Math.min(maxRd, trackOrder.length - 1 - m.origTrackIdx);
+          }
+          rd = Math.max(minRd, Math.min(maxRd, rd));
+          bulkMoveGroup(drag.group, d, rd, trackOrder);
+          return;
         }
+
+        const ns = Math.max(0, Math.min(TOTAL_STEPS - drag.origLength, snapAbs(drag.origStart + dxSteps)));
+        const targetTrack = trackOrder[cursorTrackIdx] || drag.trackKey;
+        // Always go through moveStepToTrack: it patches in place when the clip
+        // is already in the target lane and moves it otherwise. This keeps the
+        // drag effect from re-registering listeners every cross-track frame,
+        // which is what made fast drags drop events before.
+        moveStepToTrack(drag.stepId, drag.trackKey, targetTrack, { start: ns });
       } else if (drag.mode === 'resize') {
-        const arr = (steps[drag.trackKey] || []).filter(s => s.id !== drag.stepId);
-        const after = arr.filter(s => s.start >= drag.origStart).sort((a,b) => a.start - b.start)[0];
-        const maxLen = (after ? after.start : TOTAL_STEPS) - drag.origStart;
-        const nl = Math.max(subdivStep, Math.min(maxLen, drag.origLength + snapped));
+        // Snap the right edge to the current grid so resizing also realigns.
+        const maxEnd = TOTAL_STEPS;
+        const newEnd = Math.min(maxEnd, snapAbs(drag.origStart + drag.origLength + dxSteps));
+        const nl = Math.max(subdivStep, newEnd - drag.origStart);
         updateStep(drag.stepId, { length: nl });
       }
     };
@@ -1701,7 +1751,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.classList.remove('dragging'); };
-  }, [drag, subdivStep, updateStep, moveStepToTrack, steps, trackOrder, TOTAL_STEPS, STEP_W]);
+  }, [drag, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
 
   useEffect(() => {
     if (!paintDrag) return;
@@ -1717,9 +1767,10 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
     const ROW_H = 30;
     const LABEL_W = 110;
     const onMove = (e) => {
-      const gridRect = gridRef.current.getBoundingClientRect();
-      const mx = e.clientX - gridRect.left;
-      const my = e.clientY - gridRect.top;
+      const el = gridRef.current;
+      const gridRect = el.getBoundingClientRect();
+      const mx = e.clientX - gridRect.left + el.scrollLeft;
+      const my = e.clientY - gridRect.top + el.scrollTop - RULER_H;
       setMarquee(m => ({ ...m, x1: mx, y1: my }));
     };
     const onUp = () => {
@@ -1771,7 +1822,14 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
       if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      setStepW((w) => Math.max(6, Math.min(80, w * factor)));
+      // Round to whole pixels — fractional STEP_W makes repeating-linear-gradient
+      // stops drift, producing visible gridline misalignment on long songs.
+      setStepW((w) => {
+        const next = Math.round(w * factor);
+        const clamped = Math.max(6, Math.min(80, next));
+        // Round-to-int can stall the zoom when w*factor rounds back to w; nudge it.
+        return clamped === w ? Math.max(6, Math.min(80, w + (factor > 1 ? 1 : -1))) : clamped;
+      });
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -1793,7 +1851,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
         </div>
       </div>
 
-      <div className="tl-grid" style={{ width: totalW }} ref={gridRef}>
+      <div className="tl-grid" style={{ width: totalW }}>
         {balls.map((b) => (
           <React.Fragment key={b.id}>
             {['A','B'].map((led) => {
@@ -1824,26 +1882,76 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
                         onPaint(trackKey, xToSnappedStep(x));
                       }
                     }}>
-                    {arr.map(s => (
-                      <Clip key={s.id} step={s}
-                        STEP_W={STEP_W}
-                        selected={selectedStepId === s.id || selectedIds.has(s.id)}
-                        playhead={playhead}
-                        tool={tool}
-                        onSelect={() => { setSelectedStepId(s.id); setSelectedIds(new Set([s.id])); }}
-                        onErase={() => onErase(trackKey, s.start)}
-                        onMoveStart={(e) => {
-                          e.stopPropagation();
-                          setSelectedStepId(s.id);
-                          setDrag({ stepId: s.id, trackKey, mode: 'move', startX: e.clientX, origStart: s.start, origLength: s.length });
-                        }}
-                        onResizeStart={(e) => {
-                          e.stopPropagation();
-                          setSelectedStepId(s.id);
-                          setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length });
-                        }}
-                      />
-                    ))}
+                    {(() => {
+                      // Mark every clip on this track that overlaps any other clip on the same track.
+                      const overlapIds = new Set();
+                      for (let i = 0; i < arr.length; i++) {
+                        for (let j = i + 1; j < arr.length; j++) {
+                          const a = arr[i], b2 = arr[j];
+                          if (a.start < b2.start + b2.length && a.start + a.length > b2.start) {
+                            overlapIds.add(a.id); overlapIds.add(b2.id);
+                          }
+                        }
+                      }
+                      // Render longest clips first so shorter ones (and their warning
+                      // stripes) always paint on top and stay visible when contained.
+                      const ordered = [...arr].sort((a, b) => b.length - a.length);
+                      return ordered.map(s => (
+                        <Clip key={s.id} step={s}
+                          STEP_W={STEP_W}
+                          selected={selectedStepId === s.id || selectedIds.has(s.id)}
+                          overlapping={overlapIds.has(s.id)}
+                          playhead={playhead}
+                          tool={tool}
+                          onSelect={() => { setSelectedStepId(s.id); setSelectedIds(new Set([s.id])); }}
+                          onErase={() => onErase(trackKey, s.start)}
+                          onMoveStart={(e) => {
+                            e.stopPropagation();
+                            // If the grabbed clip is part of a multi-selection, drag the whole
+                            // group together — also across LEDs/balls. Otherwise become the
+                            // sole selection so single-clip drag behaves as before.
+                            const inGroup = selectedIds.has(s.id) && selectedIds.size > 1;
+                            let group = null;
+                            if (inGroup) {
+                              group = [];
+                              for (const tk in steps) {
+                                const ti = trackOrder.indexOf(tk);
+                                if (ti < 0) continue;
+                                for (const c of (steps[tk] || [])) {
+                                  if (selectedIds.has(c.id)) {
+                                    group.push({
+                                      id: c.id,
+                                      origTrackIdx: ti,
+                                      origStart: c.start,
+                                      origLength: c.length,
+                                      clip: { ...c },
+                                    });
+                                  }
+                                }
+                              }
+                            } else {
+                              setSelectedIds(new Set([s.id]));
+                            }
+                            setSelectedStepId(s.id);
+                            setDrag({
+                              stepId: s.id,
+                              trackKey,
+                              mode: 'move',
+                              startX: e.clientX,
+                              origStart: s.start,
+                              origLength: s.length,
+                              origTrackIdx: trackOrder.indexOf(trackKey),
+                              group,
+                            });
+                          }}
+                          onResizeStart={(e) => {
+                            e.stopPropagation();
+                            setSelectedStepId(s.id);
+                            setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length });
+                          }}
+                        />
+                      ));
+                    })()}
                   </div>
                 </div>
               );
@@ -1864,7 +1972,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, tool, gridSubdiv, selec
   );
 }
 
-function Clip({ step, STEP_W, selected, playhead, tool, onSelect, onErase, onMoveStart, onResizeStart }) {
+function Clip({ step, STEP_W, selected, overlapping, playhead, tool, onSelect, onErase, onMoveStart, onResizeStart }) {
   const w = step.length * STEP_W;
   const left = step.start * STEP_W;
   const cmd = COMMANDS.find(c => c.id === step.command);
@@ -1900,15 +2008,16 @@ function Clip({ step, STEP_W, selected, playhead, tool, onSelect, onErase, onMov
   const handleMouseDown = (e) => {
     e.stopPropagation();
     if (tool === 'erase') { onErase(); return; }
-    if (tool === 'select') { onSelect(); return; }
-    // paint tool: act as move handle
+    // paint and select: act as a move handle. onMoveStart selects the clip;
+    // a no-movement mousedown still falls through to onClick below.
     onMoveStart(e);
   };
-  const cursor = tool === 'erase' ? 'not-allowed' : tool === 'select' ? 'pointer' : 'grab';
+  const cursor = tool === 'erase' ? 'not-allowed' : 'grab';
 
   return (
-    <div className={"clip " + (selected?'sel':'') + " tool-" + tool}
+    <div className={"clip " + (selected?'sel ':'') + (overlapping?'overlap ':'') + "tool-" + tool}
       style={{ left, width: w, cursor }}
+      title={overlapping ? 'Overlaps another clip on this track' : undefined}
       onMouseDown={handleMouseDown}
       onClick={(e) => { e.stopPropagation(); onSelect(); }}
     >
@@ -2092,7 +2201,7 @@ function Inspector({ step, updateStep, deleteStep, palette }) {
           {COMMANDS.map(c => (
             <button key={c.id}
               className={"ins-cmd " + (step.command===c.id?'on':'')}
-              onClick={() => updateStep(step.id, { command: c.id })}>
+              onClick={() => updateStep(step.id, { command: c.id, rate: defaultRateFor(c.id) })}>
               <span className="cmd-icon">{c.icon}</span>{c.name}
             </button>
           ))}

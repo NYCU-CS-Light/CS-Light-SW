@@ -494,6 +494,32 @@ input { font-family: inherit; }
 .clip:active { cursor: grabbing; }
 .clip-fill { position: absolute; inset: 0; border-radius: 3px; }
 .clip.sel { outline: 2px solid var(--text); outline-offset: 1px; z-index: 4; }
+.clip.overlap {
+  outline: 2px solid #ff2d2d;
+  outline-offset: 1px;
+  box-shadow: 0 0 10px rgba(255,45,45,0.7), 0 0 2px rgba(255,45,45,0.9);
+  animation: clip-overlap-pulse 1s ease-in-out infinite;
+  z-index: 5;
+}
+.clip.overlap.sel { outline: 2px solid var(--text); }
+.clip.overlap::after {
+  content: '⚠ OVERLAP';
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 9px; font-weight: 700; letter-spacing: 0.12em;
+  color: #fff;
+  text-shadow: 0 0 4px #000, 0 0 2px #000;
+  background:
+    repeating-linear-gradient(45deg, rgba(255,45,45,0.55) 0 6px, rgba(0,0,0,0.0) 6px 14px),
+    rgba(255,45,45,0.18);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 4;
+}
+@keyframes clip-overlap-pulse {
+  0%,100% { box-shadow: 0 0 10px rgba(255,45,45,0.7), 0 0 2px rgba(255,45,45,0.9); }
+  50%     { box-shadow: 0 0 16px rgba(255,45,45,1),   0 0 4px rgba(255,45,45,1);   }
+}
 .clip-label {
   position: absolute; left: 4px; top: 50%; transform: translateY(-50%);
   display: flex; align-items: center; gap: 4px;
