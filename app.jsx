@@ -273,6 +273,7 @@ const CAL_LS_KEY = 'lightseq.calibration.v1';
 // Coerce a possibly-missing JSON number to a finite value, defaulting only
 // when the input is missing/NaN — not when the user genuinely set 0.
 function numOr(v, fallback) {
+  if (v == null || v === '') return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
 }
