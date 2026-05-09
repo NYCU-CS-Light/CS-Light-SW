@@ -270,20 +270,28 @@ const CAL_DEFAULTS = {
 };
 const CAL_LS_KEY = 'lightseq.calibration.v1';
 
+// Coerce a possibly-missing JSON number to a finite value, defaulting only
+// when the input is missing/NaN — not when the user genuinely set 0.
+function numOr(v, fallback) {
+  if (v == null || v === '') return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function loadCalibration() {
   try {
     const raw = localStorage.getItem(CAL_LS_KEY);
     if (!raw) return CAL_DEFAULTS;
     const parsed = JSON.parse(raw);
     return {
-      gamma:         Number(parsed.gamma)         || CAL_DEFAULTS.gamma,
+      gamma:         numOr(parsed.gamma,         CAL_DEFAULTS.gamma),
       channelGain:   {
-        r: Number(parsed.channelGain?.r) ?? CAL_DEFAULTS.channelGain.r,
-        g: Number(parsed.channelGain?.g) ?? CAL_DEFAULTS.channelGain.g,
-        b: Number(parsed.channelGain?.b) ?? CAL_DEFAULTS.channelGain.b,
+        r: numOr(parsed.channelGain?.r, CAL_DEFAULTS.channelGain.r),
+        g: numOr(parsed.channelGain?.g, CAL_DEFAULTS.channelGain.g),
+        b: numOr(parsed.channelGain?.b, CAL_DEFAULTS.channelGain.b),
       },
-      maxBrightness: Number(parsed.maxBrightness) || CAL_DEFAULTS.maxBrightness,
-      diffuser:      { sigmaPct: Number(parsed.diffuser?.sigmaPct) || CAL_DEFAULTS.diffuser.sigmaPct },
+      maxBrightness: numOr(parsed.maxBrightness, CAL_DEFAULTS.maxBrightness),
+      diffuser:      { sigmaPct: numOr(parsed.diffuser?.sigmaPct, CAL_DEFAULTS.diffuser.sigmaPct) },
     };
   } catch { return CAL_DEFAULTS; }
 }
@@ -442,14 +450,14 @@ function importCalibrationJson(setCal) {
       const text = await f.text();
       const parsed = JSON.parse(text);
       setCal({
-        gamma:         Number(parsed.gamma)         || CAL_DEFAULTS.gamma,
+        gamma:         numOr(parsed.gamma,         CAL_DEFAULTS.gamma),
         channelGain: {
-          r: Number(parsed.channelGain?.r) ?? CAL_DEFAULTS.channelGain.r,
-          g: Number(parsed.channelGain?.g) ?? CAL_DEFAULTS.channelGain.g,
-          b: Number(parsed.channelGain?.b) ?? CAL_DEFAULTS.channelGain.b,
+          r: numOr(parsed.channelGain?.r, CAL_DEFAULTS.channelGain.r),
+          g: numOr(parsed.channelGain?.g, CAL_DEFAULTS.channelGain.g),
+          b: numOr(parsed.channelGain?.b, CAL_DEFAULTS.channelGain.b),
         },
-        maxBrightness: Number(parsed.maxBrightness) || CAL_DEFAULTS.maxBrightness,
-        diffuser:      { sigmaPct: Number(parsed.diffuser?.sigmaPct) || CAL_DEFAULTS.diffuser.sigmaPct },
+        maxBrightness: numOr(parsed.maxBrightness, CAL_DEFAULTS.maxBrightness),
+        diffuser:      { sigmaPct: numOr(parsed.diffuser?.sigmaPct, CAL_DEFAULTS.diffuser.sigmaPct) },
       });
     } catch (e) {
       alert('Could not import calibration JSON: ' + e.message);
@@ -1012,20 +1020,23 @@ function App() {
           return emit(4, durMs, Math.max(100, onMs), 0, c1, c2);
         case 'rainbow': {
           // Expand into a chain of FADEs across the hue cycle. cyclePeriod = clip.on.
+          // Total emitted duration must equal durMs exactly so the clip doesn't
+          // bleed into whatever comes after it on the timeline.
           const cyclePeriod = Math.max(600, onMs);
           const stops = 6;
           const segMs = Math.max(40, Math.round(cyclePeriod / stops));
-          const cycles = Math.max(1, Math.round(durMs / cyclePeriod));
-          const totalSegs = cycles * stops;
-          // remainder absorbed into last segment
+          // Floor (don't round) so we never overshoot, then absorb the
+          // remainder into the last segment. Always emit at least one segment.
+          const fitSegs = Math.max(1, Math.floor(durMs / segMs));
+          const lastSegMs = durMs - segMs * (fitSegs - 1);
           const segs = [];
-          for (let i = 0; i < totalSegs; i++) {
+          for (let i = 0; i < fitSegs; i++) {
             const h1 = (i / stops) % 1;
             const h2 = ((i + 1) / stops) % 1;
             const a = scaleRgb(hsl2rgb(h1, 1, 0.5), clip.brightness ?? 1);
             const b = scaleRgb(hsl2rgb(h2, 1, 0.5), clip.brightness ?? 1);
-            const isLast = i === totalSegs - 1;
-            const d = isLast ? Math.max(40, durMs - segMs * (totalSegs - 1)) : segMs;
+            const d = (i === fitSegs - 1) ? lastSegMs : segMs;
+            if (d <= 0) continue;
             // Each rainbow segment is itself a FADE; emit() handles overflow.
             emit(2, d, 0, 0, a, b).forEach(r => segs.push(r));
           }
