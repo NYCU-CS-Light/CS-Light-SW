@@ -57,7 +57,6 @@ const PALETTES = {
     { name: 'Indigo', hex: '#3000ff' },
     { name: 'Purple', hex: '#a000ff' },
     { name: 'White',  hex: '#ffffff' },
-    { name: 'Black',  hex: '#000000' },
   ],
 };
 
@@ -80,38 +79,6 @@ function defaultRateFor(cmdId) {
   if (cmdId === 'blink') return 8;
   if (cmdId === 'breathe' || cmdId === 'pingpong') return 4;
   return 1;
-}
-
-// Firmware-native timing per command: BLINK uses both on/off, BREATHE / PINGPONG
-// / RAINBOW use `on` as the full period; everything else has no timing field.
-function defaultTimingFor(cmdId) {
-  switch (cmdId) {
-    case 'blink':    return { on: 125, off: 125 };  // 4 Hz strobe
-    case 'breathe':  return { on: 1500, off: 0 };
-    case 'pingpong': return { on: 1000, off: 0 };
-    case 'rainbow':  return { on: 2000, off: 0 };
-    default:         return { on: 0, off: 0 };
-  }
-}
-
-// Resolve the on-time / off-time of a clip in milliseconds, falling back to
-// the legacy `rate` field (cycles/sec for the firmware) so projects saved
-// before this refactor still load and play at their original cadence.
-function clipOnMs(clip) {
-  if (clip.on != null) return clip.on;
-  const rate = Math.max(0.1, clip.rate ?? defaultRateFor(clip.command));
-  switch (clip.command) {
-    case 'blink':    return Math.max(20, Math.round(500 / rate));
-    case 'breathe':
-    case 'pingpong':
-    case 'rainbow':  return Math.max(100, Math.round(1000 / rate));
-    default:         return 0;
-  }
-}
-function clipOffMs(clip) {
-  if (clip.off != null) return clip.off;
-  if (clip.command === 'blink') return clipOnMs(clip);
-  return 0;
 }
 
 // ============ INITIAL DATA ============
@@ -200,14 +167,11 @@ function hslToHex(h, s, l) {
   return rgbToHex((r+m)*255,(g+m)*255,(b+m)*255);
 }
 
-// step + playhead position → { color, brightness } or null. `stepsPerSec` is
-// (bpm/60)*4 — used to convert the clip-relative position into milliseconds so
-// BLINK / BREATHE / PINGPONG / RAINBOW run at the same wall-clock cadence the
-// firmware will, instead of cycling N times per clip regardless of duration.
-function evalStep(step, playhead, stepsPerSec) {
+// step + playhead position → { color, brightness } or null
+function evalStep(step, playhead) {
   if (playhead < step.start || playhead >= step.start + step.length) return null;
   const local = (playhead - step.start) / step.length; // 0..1 within clip
-  const elapsedMs = stepsPerSec > 0 ? (playhead - step.start) / stepsPerSec * 1000 : 0;
+  const rate = step.rate ?? 1;
   let color = step.color;
   let brightness = step.brightness ?? 1;
   switch (step.command) {
@@ -219,19 +183,15 @@ function evalStep(step, playhead, stepsPerSec) {
       brightness = 0;
       break;
     case 'breathe': {
-      const period = clipOnMs(step) || 1000;
-      const phase = (elapsedMs % period) / period;
-      brightness *= 0.5 + 0.5 * Math.sin(phase * Math.PI * 2 - Math.PI / 2);
+      // sine 0..1
+      const phase = local * rate;
+      brightness *= 0.5 + 0.5 * Math.sin(phase * Math.PI * 2 - Math.PI/2);
       break;
     }
     case 'blink': {
-      const on = clipOnMs(step);
-      const off = clipOffMs(step);
-      const period = on + off;
-      if (period > 0) {
-        const phase = elapsedMs % period;
-        color = phase < on ? step.color : (step.colorB || '#000000');
-      }
+      const phase = local * rate;
+      const on = Math.floor(phase * 2) % 2 === 0;
+      color = on ? step.color : (step.colorB || '#000000');
       break;
     }
     case 'fade': {
@@ -239,17 +199,14 @@ function evalStep(step, playhead, stepsPerSec) {
       break;
     }
     case 'rainbow': {
-      const period = clipOnMs(step) || 1000;
-      const h = ((elapsedMs % period) / period) * 360;
+      const h = (local * rate * 360) % 360;
       color = hslToHex(h, 1, 0.55);
       break;
     }
     case 'pingpong': {
-      const period = clipOnMs(step) || 1000;
-      const phase = (elapsedMs % period) / period;
-      // Firmware: a = (1 - cos(2π·t)) / 2 — A at phase 0/1, B at phase 0.5.
-      const a = (1 - Math.cos(2 * Math.PI * phase)) * 0.5;
-      color = lerpColor(step.color, step.colorB || step.color, a);
+      // sine sweep A<->B
+      const phase = (local * rate) % 1;
+      brightness *= Math.max(0, 1 - Math.abs(phase - 0.5) * 2.5);
       break;
     }
     default:
@@ -270,28 +227,20 @@ const CAL_DEFAULTS = {
 };
 const CAL_LS_KEY = 'lightseq.calibration.v1';
 
-// Coerce a possibly-missing JSON number to a finite value, defaulting only
-// when the input is missing/NaN — not when the user genuinely set 0.
-function numOr(v, fallback) {
-  if (v == null || v === '') return fallback;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
 function loadCalibration() {
   try {
     const raw = localStorage.getItem(CAL_LS_KEY);
     if (!raw) return CAL_DEFAULTS;
     const parsed = JSON.parse(raw);
     return {
-      gamma:         numOr(parsed.gamma,         CAL_DEFAULTS.gamma),
+      gamma:         Number(parsed.gamma)         || CAL_DEFAULTS.gamma,
       channelGain:   {
-        r: numOr(parsed.channelGain?.r, CAL_DEFAULTS.channelGain.r),
-        g: numOr(parsed.channelGain?.g, CAL_DEFAULTS.channelGain.g),
-        b: numOr(parsed.channelGain?.b, CAL_DEFAULTS.channelGain.b),
+        r: Number(parsed.channelGain?.r) ?? CAL_DEFAULTS.channelGain.r,
+        g: Number(parsed.channelGain?.g) ?? CAL_DEFAULTS.channelGain.g,
+        b: Number(parsed.channelGain?.b) ?? CAL_DEFAULTS.channelGain.b,
       },
-      maxBrightness: numOr(parsed.maxBrightness, CAL_DEFAULTS.maxBrightness),
-      diffuser:      { sigmaPct: numOr(parsed.diffuser?.sigmaPct, CAL_DEFAULTS.diffuser.sigmaPct) },
+      maxBrightness: Number(parsed.maxBrightness) || CAL_DEFAULTS.maxBrightness,
+      diffuser:      { sigmaPct: Number(parsed.diffuser?.sigmaPct) || CAL_DEFAULTS.diffuser.sigmaPct },
     };
   } catch { return CAL_DEFAULTS; }
 }
@@ -450,14 +399,14 @@ function importCalibrationJson(setCal) {
       const text = await f.text();
       const parsed = JSON.parse(text);
       setCal({
-        gamma:         numOr(parsed.gamma,         CAL_DEFAULTS.gamma),
+        gamma:         Number(parsed.gamma)         || CAL_DEFAULTS.gamma,
         channelGain: {
-          r: numOr(parsed.channelGain?.r, CAL_DEFAULTS.channelGain.r),
-          g: numOr(parsed.channelGain?.g, CAL_DEFAULTS.channelGain.g),
-          b: numOr(parsed.channelGain?.b, CAL_DEFAULTS.channelGain.b),
+          r: Number(parsed.channelGain?.r) ?? CAL_DEFAULTS.channelGain.r,
+          g: Number(parsed.channelGain?.g) ?? CAL_DEFAULTS.channelGain.g,
+          b: Number(parsed.channelGain?.b) ?? CAL_DEFAULTS.channelGain.b,
         },
-        maxBrightness: numOr(parsed.maxBrightness, CAL_DEFAULTS.maxBrightness),
-        diffuser:      { sigmaPct: numOr(parsed.diffuser?.sigmaPct, CAL_DEFAULTS.diffuser.sigmaPct) },
+        maxBrightness: Number(parsed.maxBrightness) || CAL_DEFAULTS.maxBrightness,
+        diffuser:      { sigmaPct: Number(parsed.diffuser?.sigmaPct) || CAL_DEFAULTS.diffuser.sigmaPct },
       });
     } catch (e) {
       alert('Could not import calibration JSON: ' + e.message);
@@ -518,6 +467,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [clipboard, setClipboard] = useState(null); // { clips: [{trackKey, start, length, command, color, colorB, brightness, rate}], anchor }
   const [bpm, setBpm] = useState(120);
+  const [snapToGrid, setSnapToGrid] = useState(true);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(0);
   const [loop, setLoop] = useState(true);
@@ -750,7 +700,6 @@ function App() {
       if (arr.some(s => s.start === startStep)) return prev;
       const length = Math.max(0, Math.min(desiredLen, TOTAL_STEPS - startStep));
       if (length <= 0) return prev;
-      const timing = defaultTimingFor(selectedCommand);
       const newStep = {
         id: cryptoId(),
         start: startStep,
@@ -759,8 +708,7 @@ function App() {
         color: palette[selectedColor].hex,
         colorB: palette[(selectedColor + 4) % palette.length].hex,
         brightness: 1,
-        on: timing.on,
-        off: timing.off,
+        rate: defaultRateFor(selectedCommand),
       };
       setSelectedStepId(newStep.id);
       return { ...prev, [trackKey]: [...arr, newStep] };
@@ -801,9 +749,7 @@ function App() {
         color: c.color,
         colorB: c.colorB,
         brightness: c.brightness,
-        on: c.on,
-        off: c.off,
-        rate: c.rate, // kept so legacy clipboard payloads still resolve via clipOnMs fallback
+        rate: c.rate,
       }));
       setClipboard({ clips: payload });
       return prev;
@@ -831,7 +777,7 @@ function App() {
         out[c.trackKey] = [...arr, {
           id, start: startStep, length,
           command: c.command, color: c.color, colorB: c.colorB,
-          brightness: c.brightness, on: c.on, off: c.off, rate: c.rate,
+          brightness: c.brightness, rate: c.rate,
         }];
       }
       if (newIds.length > 0) {
@@ -998,8 +944,7 @@ function App() {
     const clipToRows = (clip, durMs) => {
       const c1 = scaleRgb(hex2rgb(clip.color), clip.brightness ?? 1);
       const c2 = clip.colorB ? scaleRgb(hex2rgb(clip.colorB), clip.brightness ?? 1) : [0,0,0];
-      const onMs = clipOnMs(clip);
-      const offMs = clipOffMs(clip);
+      const rate = Math.max(0.1, clip.rate ?? 1);
       switch (clip.command) {
         case 'color':
           return emit(0, durMs, 0, 0, c1, [0,0,0]);
@@ -1010,33 +955,40 @@ function App() {
             row(5, 0, 0, 0, [0,0,0], [0,0,0]),
             row(6, 0, 0, 0, [0,0,0], [0,0,0]),
           ];
-        case 'blink':
-          return emit(1, durMs, Math.max(20, onMs), Math.max(20, offMs), c1, c2);
+        case 'blink': {
+          // BLINK: rate = flashes/sec; on=off=half-period
+          const half = Math.max(20, Math.round(500 / rate));
+          return emit(1, durMs, half, half, c1, c2);
+        }
         case 'fade':
           return emit(2, durMs, 0, 0, c1, c2);
-        case 'breathe':
-          return emit(3, durMs, Math.max(100, onMs), 0, c1, [0,0,0]);
-        case 'pingpong':
-          return emit(4, durMs, Math.max(100, onMs), 0, c1, c2);
+        case 'breathe': {
+          // BREATHE: period = 1000/rate ms
+          const period = Math.max(100, Math.round(1000 / rate));
+          return emit(3, durMs, period, 0, c1, [0,0,0]);
+        }
+        case 'pingpong': {
+          // PINGPONG between c1 and c2
+          const period = Math.max(100, Math.round(1000 / rate));
+          return emit(4, durMs, period, 0, c1, c2);
+        }
         case 'rainbow': {
-          // Expand into a chain of FADEs across the hue cycle. cyclePeriod = clip.on.
-          // Total emitted duration must equal durMs exactly so the clip doesn't
-          // bleed into whatever comes after it on the timeline.
-          const cyclePeriod = Math.max(600, onMs);
+          // Expand into a chain of FADEs across hue cycle.
+          // Period per full cycle = 1000/rate ms; min 6 stops.
+          const cyclePeriod = Math.max(600, Math.round(1000 / rate));
           const stops = 6;
           const segMs = Math.max(40, Math.round(cyclePeriod / stops));
-          // Floor (don't round) so we never overshoot, then absorb the
-          // remainder into the last segment. Always emit at least one segment.
-          const fitSegs = Math.max(1, Math.floor(durMs / segMs));
-          const lastSegMs = durMs - segMs * (fitSegs - 1);
+          const cycles = Math.max(1, Math.round(durMs / cyclePeriod));
+          const totalSegs = cycles * stops;
+          // remainder absorbed into last segment
           const segs = [];
-          for (let i = 0; i < fitSegs; i++) {
+          for (let i = 0; i < totalSegs; i++) {
             const h1 = (i / stops) % 1;
             const h2 = ((i + 1) / stops) % 1;
             const a = scaleRgb(hsl2rgb(h1, 1, 0.5), clip.brightness ?? 1);
             const b = scaleRgb(hsl2rgb(h2, 1, 0.5), clip.brightness ?? 1);
-            const d = (i === fitSegs - 1) ? lastSegMs : segMs;
-            if (d <= 0) continue;
+            const isLast = i === totalSegs - 1;
+            const d = isLast ? Math.max(40, durMs - segMs * (totalSegs - 1)) : segMs;
             // Each rainbow segment is itself a FADE; emit() handles overflow.
             emit(2, d, 0, 0, a, b).forEach(r => segs.push(r));
           }
@@ -1128,18 +1080,17 @@ function App() {
 
   // Live LED states
   const litState = useMemo(() => {
-    const stepsPerSec = (bpm / 60) * 4;
     const out = {};
     balls.forEach(b => {
       ['A', 'B'].forEach(led => {
         const key = b.id + '-' + led;
         const arr = steps[key] || [];
         const active = arr.find(s => playhead >= s.start && playhead < s.start + s.length);
-        out[key] = active ? evalStep(active, playhead, stepsPerSec) : null;
+        out[key] = active ? evalStep(active, playhead) : null;
       });
     });
     return out;
-  }, [playhead, steps, balls, bpm]);
+  }, [playhead, steps, balls]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -1199,6 +1150,7 @@ function App() {
         playhead={playhead} setPlayhead={setPlayhead}
         tool={tool} setTool={setTool}
         gridRes={t.gridRes} setGridRes={(v) => setTweak('gridRes', v)}
+        snapToGrid={snapToGrid} setSnapToGrid={setSnapToGrid}
         onExport={exportTxt}
         onNewProject={newProject}
         onExportProject={exportProject}
@@ -1239,7 +1191,7 @@ function App() {
             steps={steps}
             playhead={playhead}
             setPlayhead={setPlayhead}
-            bpm={bpm}
+            snapToGrid={snapToGrid}
             tool={tool}
             gridSubdiv={gridSubdiv}
             selectedStepId={selectedStepId}
@@ -1335,7 +1287,7 @@ function App() {
 }
 
 // ============ TOP BAR ============
-function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, onExport, onNewProject, onExportProject, onImportProject }) {
+function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, onExport, onNewProject, onExportProject, onImportProject }) {
   const RESOLUTIONS = ['1/2','1/4','1/8','1/16','1/32','1/64'];
   const bar = Math.floor(playhead / 16) + 1;
   const beat = Math.floor((playhead % 16) / 4) + 1;
@@ -1409,6 +1361,7 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         <button className={"tool " + (tool==='paint'?'on':'')} onClick={() => setTool('paint')} title="Paint (P)">✏</button>
         <button className={"tool " + (tool==='select'?'on':'')} onClick={() => setTool('select')} title="Select (S)">▢</button>
         <button className={"tool " + (tool==='erase'?'on':'')} onClick={() => setTool('erase')} title="Erase (E)">⌫</button>
+        <button className={"tool " + (snapToGrid ? 'on' : '')} onClick={() => setSnapToGrid(v => !v)} title="Snap to Grid">⊞</button>
         <div className="file-menu" ref={menuRef}>
           <button className={"tool file-menu-btn " + (menuOpen ? 'on' : '')} onClick={() => setMenuOpen(o => !o)} title="Project menu">
             File ▾
@@ -1675,7 +1628,7 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
+function Timeline({ balls, steps, playhead, setPlayhead, snapToGrid, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
@@ -1688,10 +1641,6 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
   // gridSubdiv is "divisions per bar": 1/4 = 4 cells/bar, 1/16 = 16/bar, 1/64 = 64/bar.
   const cellsPerBar = gridSubdiv;
   const subdivStep = STEPS_PER_BAR / cellsPerBar;
-  // Pixels per millisecond — used by Clip to draw stripes at the same wall-clock
-  // cadence the firmware will play, so on/off and period changes show up visually.
-  const stepsPerSec = (bpm / 60) * 4;
-  const pxPerMs = stepsPerSec > 0 ? (STEP_W * stepsPerSec) / 1000 : 0;
 
   // Flat list of trackKeys in display order — used to map drag-Y → target lane.
   const ROW_H = 30;
@@ -1703,7 +1652,10 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
   }, [balls]);
 
   const xToStep = (x) => Math.max(0, Math.min(TOTAL_STEPS, x / STEP_W));
-  const xToSnappedStep = (x) => Math.floor(xToStep(x) / subdivStep) * subdivStep;
+  const xToSnappedStep = (x) => {
+    const step = xToStep(x);
+    return snapToGrid ? Math.floor(step / subdivStep) * subdivStep : step;
+  };
 
   const onMouseDownGrid = (e, trackKey, rowEl) => {
     if (e.target.classList.contains('clip') || e.target.closest('.clip')) return;
@@ -1759,6 +1711,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
       // so a clip placed at a finer resolution lands on the current grid as
       // soon as it's moved, instead of preserving its old sub-step offset.
       const snapAbs = (v) => Math.round(v / subdivStep) * subdivStep;
+      const targetStart = snapToGrid ? snapAbs(drag.origStart + dxSteps) : drag.origStart + dxSteps;
       if (drag.mode === 'move') {
         // Cursor's current track index (used for both single and group drag).
         let cursorTrackIdx = drag.origTrackIdx;
@@ -1771,8 +1724,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
         if (drag.group) {
           // Group drag: shift every member by the same time delta and the same
           // row delta so the whole selection translates together.
-          const primaryNs = snapAbs(drag.origStart + dxSteps);
-          let d = primaryNs - drag.origStart;
+          let d = targetStart - drag.origStart;
           for (const m of drag.group) {
             d = Math.max(-m.origStart, Math.min(TOTAL_STEPS - m.origLength - m.origStart, d));
           }
@@ -1787,7 +1739,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
           return;
         }
 
-        const ns = Math.max(0, Math.min(TOTAL_STEPS - drag.origLength, snapAbs(drag.origStart + dxSteps)));
+        const ns = Math.max(0, Math.min(TOTAL_STEPS - drag.origLength, targetStart));
         const targetTrack = trackOrder[cursorTrackIdx] || drag.trackKey;
         // Always go through moveStepToTrack: it patches in place when the clip
         // is already in the target lane and moves it otherwise. This keeps the
@@ -1795,9 +1747,8 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
         // which is what made fast drags drop events before.
         moveStepToTrack(drag.stepId, drag.trackKey, targetTrack, { start: ns });
       } else if (drag.mode === 'resize') {
-        // Snap the right edge to the current grid so resizing also realigns.
         const maxEnd = TOTAL_STEPS;
-        const newEnd = Math.min(maxEnd, snapAbs(drag.origStart + drag.origLength + dxSteps));
+        const newEnd = Math.min(maxEnd, snapToGrid ? snapAbs(drag.origStart + drag.origLength + dxSteps) : drag.origStart + drag.origLength + dxSteps);
         const nl = Math.max(subdivStep, newEnd - drag.origStart);
         updateStep(drag.stepId, { length: nl });
       }
@@ -1806,7 +1757,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.classList.remove('dragging'); };
-  }, [drag, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
+  }, [drag, snapToGrid, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
 
   useEffect(() => {
     if (!paintDrag) return;
@@ -1954,7 +1905,6 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
                       return ordered.map(s => (
                         <Clip key={s.id} step={s}
                           STEP_W={STEP_W}
-                          pxPerMs={pxPerMs}
                           selected={selectedStepId === s.id || selectedIds.has(s.id)}
                           overlapping={overlapIds.has(s.id)}
                           playhead={playhead}
@@ -2028,16 +1978,12 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
   );
 }
 
-function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, onSelect, onErase, onMoveStart, onResizeStart }) {
+function Clip({ step, STEP_W, selected, overlapping, playhead, tool, onSelect, onErase, onMoveStart, onResizeStart }) {
   const w = step.length * STEP_W;
   const left = step.start * STEP_W;
   const cmd = COMMANDS.find(c => c.id === step.command);
 
-  // Visual fill per command type. For period-based commands, stripe widths
-  // mirror the firmware's actual on/off/period in pixels (pxPerMs * ms), so
-  // changing ON / OFF / PERIOD in the inspector visibly retunes the clip.
-  // A 2px floor keeps very fast cycles from collapsing into a flat color.
-  const stripePx = (ms, min = 2) => Math.max(min, Math.round((pxPerMs || 0) * ms));
+  // Visual fill per command type
   let fill;
   switch (step.command) {
     case 'color':
@@ -2046,36 +1992,21 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
     case 'restart':
       fill = `repeating-linear-gradient(45deg, #2a2a2a 0 6px, #1a1a1a 6px 12px)`;
       break;
-    case 'breathe': {
-      const period = stripePx(clipOnMs(step), 8);
-      const half = Math.max(4, Math.round(period / 2));
-      fill = `repeating-linear-gradient(90deg, ${step.color} 0 ${half}px, ${step.color}66 ${half}px ${period}px)`;
+    case 'breathe':
+      fill = `repeating-linear-gradient(90deg, ${step.color} 0px, ${step.color}88 ${Math.max(8, w/(step.rate||4)/2)}px, ${step.color} ${Math.max(16, w/(step.rate||4))}px)`;
       break;
-    }
-    case 'blink': {
-      const onPx = stripePx(clipOnMs(step));
-      const offPx = stripePx(clipOffMs(step));
-      const total = onPx + offPx;
-      fill = `repeating-linear-gradient(90deg, ${step.color} 0 ${onPx}px, ${step.colorB||'#000'} ${onPx}px ${total}px)`;
+    case 'blink':
+      fill = `repeating-linear-gradient(90deg, ${step.color} 0 6px, ${step.colorB||'#000'} 6px 12px)`;
       break;
-    }
     case 'fade':
       fill = `linear-gradient(90deg, ${step.color}, ${step.colorB||step.color})`;
       break;
-    case 'rainbow': {
-      // One full hue sweep per cycle period; tile across the clip width.
-      const period = stripePx(clipOnMs(step), 24);
-      fill = `repeating-linear-gradient(90deg, #ff3b3b 0, #ff8a00 ${Math.round(period * 0.14)}px, #ffc933 ${Math.round(period * 0.28)}px, #3ddc84 ${Math.round(period * 0.42)}px, #22d3ee ${Math.round(period * 0.57)}px, #3b82f6 ${Math.round(period * 0.71)}px, #a855f7 ${Math.round(period * 0.85)}px, #ff3b3b ${period}px)`;
+    case 'rainbow':
+      fill = `linear-gradient(90deg, #ff3b3b, #ff8a00, #ffc933, #3ddc84, #22d3ee, #3b82f6, #a855f7, #ec4899)`;
       break;
-    }
-    case 'pingpong': {
-      const period = stripePx(clipOnMs(step), 8);
-      const mid = Math.max(2, Math.round(period / 2));
-      const a = step.color;
-      const b = step.colorB || step.color;
-      fill = `repeating-linear-gradient(90deg, ${a} 0, ${b} ${mid}px, ${a} ${period}px)`;
+    case 'pingpong':
+      fill = `linear-gradient(90deg, ${step.color}22, ${step.color}, ${step.colorB||step.color}22)`;
       break;
-    }
     default:
       fill = step.color;
   }
@@ -2264,11 +2195,7 @@ function Inspector({ step, updateStep, deleteStep, palette }) {
   const [ballId, led] = step.trackKey.split('-');
   const cmd = COMMANDS.find(c => c.id === step.command);
   const usesColorB = step.command === 'fade' || step.command === 'blink' || step.command === 'pingpong';
-  const showsBlinkTiming = step.command === 'blink';
-  const showsPeriod = step.command === 'breathe' || step.command === 'pingpong' || step.command === 'rainbow';
-  const periodLabel = step.command === 'rainbow' ? 'CYCLE' : 'PERIOD';
-  const periodMin = step.command === 'rainbow' ? 200 : 100;
-  const periodMax = step.command === 'rainbow' ? 10000 : 5000;
+  const showsRate = step.command === 'breathe' || step.command === 'blink' || step.command === 'rainbow' || step.command === 'pingpong';
 
   return (
     <div className="inspector">
@@ -2280,10 +2207,7 @@ function Inspector({ step, updateStep, deleteStep, palette }) {
           {COMMANDS.map(c => (
             <button key={c.id}
               className={"ins-cmd " + (step.command===c.id?'on':'')}
-              onClick={() => {
-                const t = defaultTimingFor(c.id);
-                updateStep(step.id, { command: c.id, on: t.on, off: t.off });
-              }}>
+              onClick={() => updateStep(step.id, { command: c.id, rate: defaultRateFor(c.id) })}>
               <span className="cmd-icon">{c.icon}</span>{c.name}
             </button>
           ))}
@@ -2325,45 +2249,14 @@ function Inspector({ step, updateStep, deleteStep, palette }) {
           onChange={e => updateStep(step.id, { brightness: parseFloat(e.target.value) })}/>
       </div>
 
-      {showsBlinkTiming && (
-        <>
-          <div className="ins-section">
-            <div className="ins-label-row">
-              <span className="ins-label">ON</span>
-              <span className="ins-val mono">{clipOnMs(step)} ms</span>
-            </div>
-            <input type="range" min="20" max="2000" step="5" value={clipOnMs(step)}
-              onChange={e => {
-                const v = parseInt(e.target.value, 10);
-                const patch = { on: v };
-                if (step.off == null) patch.off = clipOffMs(step);
-                updateStep(step.id, patch);
-              }}/>
-          </div>
-          <div className="ins-section">
-            <div className="ins-label-row">
-              <span className="ins-label">OFF</span>
-              <span className="ins-val mono">{clipOffMs(step)} ms</span>
-            </div>
-            <input type="range" min="20" max="2000" step="5" value={clipOffMs(step)}
-              onChange={e => {
-                const v = parseInt(e.target.value, 10);
-                const patch = { off: v };
-                if (step.on == null) patch.on = clipOnMs(step);
-                updateStep(step.id, patch);
-              }}/>
-          </div>
-        </>
-      )}
-
-      {showsPeriod && (
+      {showsRate && (
         <div className="ins-section">
           <div className="ins-label-row">
-            <span className="ins-label">{periodLabel}</span>
-            <span className="ins-val mono">{clipOnMs(step)} ms</span>
+            <span className="ins-label">RATE</span>
+            <span className="ins-val mono">{(step.rate??1).toFixed(1)}×</span>
           </div>
-          <input type="range" min={periodMin} max={periodMax} step="10" value={clipOnMs(step)}
-            onChange={e => updateStep(step.id, { on: parseInt(e.target.value, 10) })}/>
+          <input type="range" min="0.25" max="16" step="0.25" value={step.rate??1}
+            onChange={e => updateStep(step.id, { rate: parseFloat(e.target.value) })}/>
         </div>
       )}
 
