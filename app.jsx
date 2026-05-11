@@ -1074,8 +1074,6 @@ function App() {
       if (cursor < TOTAL_STEPS) {
         emit(0, stepsToMs(TOTAL_STEPS - cursor), 0, 0, [0,0,0], [0,0,0]).forEach(r => out.push(r));
       }
-      // CMD_LOOP infinite at end
-      out.push('6,0,0,0,0,0,0,0,0,0');
       return out.join('\n') + '\n';
     };
 
