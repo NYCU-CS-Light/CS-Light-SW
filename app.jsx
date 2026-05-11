@@ -518,6 +518,7 @@ function App() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [clipboard, setClipboard] = useState(null); // { clips: [{trackKey, start, length, command, color, colorB, brightness, rate}], anchor }
   const [bpm, setBpm] = useState(120);
+  const [snapToGrid, setSnapToGrid] = useState(true);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(0);
   const [loop, setLoop] = useState(true);
@@ -1199,6 +1200,7 @@ function App() {
         playhead={playhead} setPlayhead={setPlayhead}
         tool={tool} setTool={setTool}
         gridRes={t.gridRes} setGridRes={(v) => setTweak('gridRes', v)}
+        snapToGrid={snapToGrid} setSnapToGrid={setSnapToGrid}
         onExport={exportTxt}
         onNewProject={newProject}
         onExportProject={exportProject}
@@ -1240,6 +1242,7 @@ function App() {
             playhead={playhead}
             setPlayhead={setPlayhead}
             bpm={bpm}
+            snapToGrid={snapToGrid}
             tool={tool}
             gridSubdiv={gridSubdiv}
             selectedStepId={selectedStepId}
@@ -1335,7 +1338,7 @@ function App() {
 }
 
 // ============ TOP BAR ============
-function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, onExport, onNewProject, onExportProject, onImportProject }) {
+function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, onExport, onNewProject, onExportProject, onImportProject }) {
   const RESOLUTIONS = ['1/2','1/4','1/8','1/16','1/32','1/64'];
   const bar = Math.floor(playhead / 16) + 1;
   const beat = Math.floor((playhead % 16) / 4) + 1;
@@ -1409,6 +1412,7 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         <button className={"tool " + (tool==='paint'?'on':'')} onClick={() => setTool('paint')} title="Paint (P)">✏</button>
         <button className={"tool " + (tool==='select'?'on':'')} onClick={() => setTool('select')} title="Select (S)">▢</button>
         <button className={"tool " + (tool==='erase'?'on':'')} onClick={() => setTool('erase')} title="Erase (E)">⌫</button>
+        <button className={"tool " + (snapToGrid ? 'on' : '')} onClick={() => setSnapToGrid(v => !v)} title="Snap to Grid">⊞</button>
         <div className="file-menu" ref={menuRef}>
           <button className={"tool file-menu-btn " + (menuOpen ? 'on' : '')} onClick={() => setMenuOpen(o => !o)} title="Project menu">
             File ▾
@@ -1675,7 +1679,7 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
+function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
@@ -1703,7 +1707,10 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
   }, [balls]);
 
   const xToStep = (x) => Math.max(0, Math.min(TOTAL_STEPS, x / STEP_W));
-  const xToSnappedStep = (x) => Math.floor(xToStep(x) / subdivStep) * subdivStep;
+  const xToSnappedStep = (x) => {
+    const step = xToStep(x);
+    return snapToGrid ? Math.floor(step / subdivStep) * subdivStep : step;
+  };
 
   const onMouseDownGrid = (e, trackKey, rowEl) => {
     if (e.target.classList.contains('clip') || e.target.closest('.clip')) return;
@@ -1759,6 +1766,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
       // so a clip placed at a finer resolution lands on the current grid as
       // soon as it's moved, instead of preserving its old sub-step offset.
       const snapAbs = (v) => Math.round(v / subdivStep) * subdivStep;
+      const targetStart = snapToGrid ? snapAbs(drag.origStart + dxSteps) : drag.origStart + dxSteps;
       if (drag.mode === 'move') {
         // Cursor's current track index (used for both single and group drag).
         let cursorTrackIdx = drag.origTrackIdx;
@@ -1771,8 +1779,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
         if (drag.group) {
           // Group drag: shift every member by the same time delta and the same
           // row delta so the whole selection translates together.
-          const primaryNs = snapAbs(drag.origStart + dxSteps);
-          let d = primaryNs - drag.origStart;
+          let d = targetStart - drag.origStart;
           for (const m of drag.group) {
             d = Math.max(-m.origStart, Math.min(TOTAL_STEPS - m.origLength - m.origStart, d));
           }
@@ -1787,7 +1794,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
           return;
         }
 
-        const ns = Math.max(0, Math.min(TOTAL_STEPS - drag.origLength, snapAbs(drag.origStart + dxSteps)));
+        const ns = Math.max(0, Math.min(TOTAL_STEPS - drag.origLength, targetStart));
         const targetTrack = trackOrder[cursorTrackIdx] || drag.trackKey;
         // Always go through moveStepToTrack: it patches in place when the clip
         // is already in the target lane and moves it otherwise. This keeps the
@@ -1795,9 +1802,8 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
         // which is what made fast drags drop events before.
         moveStepToTrack(drag.stepId, drag.trackKey, targetTrack, { start: ns });
       } else if (drag.mode === 'resize') {
-        // Snap the right edge to the current grid so resizing also realigns.
         const maxEnd = TOTAL_STEPS;
-        const newEnd = Math.min(maxEnd, snapAbs(drag.origStart + drag.origLength + dxSteps));
+        const newEnd = Math.min(maxEnd, snapToGrid ? snapAbs(drag.origStart + drag.origLength + dxSteps) : drag.origStart + drag.origLength + dxSteps);
         const nl = Math.max(subdivStep, newEnd - drag.origStart);
         updateStep(drag.stepId, { length: nl });
       }
@@ -1806,7 +1812,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, tool, gridSubdiv, 
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.classList.remove('dragging'); };
-  }, [drag, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
+  }, [drag, snapToGrid, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
 
   useEffect(() => {
     if (!paintDrag) return;
