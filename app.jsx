@@ -9,7 +9,14 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "dark",
   "paletteMode": "realworld",
   "ballGlow": 0.85,
-  "waveStyle": "wave"
+  "waveStyle": "wave",
+  "perfSimEnabled": false,
+  "perfSimPattern": "forward",
+  "perfSimRadiusPct": 70,
+  "perfSimPeriodBars": 1,
+  "perfSimHandGapPct": 55,
+  "perfSimGuides": true,
+  "perfSimTrail": 0.7
 }/*EDITMODE-END*/;
 
 // ============ PALETTES ============
@@ -525,6 +532,10 @@ function App() {
   const [audio, setAudio] = useState(null); // { name, peaks, durationSec, buffer }
   const audioCtxRef = useRef(null);
   const audioSourceRef = useRef(null);
+  // When audio is playing, the visual playhead is locked to the AudioContext clock
+  // (not requestAnimationFrame dt) so notes stay aligned with the music. Anchor records
+  // the (ctx.currentTime, playhead) pair at the moment the buffer source started.
+  const audioAnchorRef = useRef(null);
   const [restartTick, setRestartTick] = useState(0); // bumped when Restart clip is hit, retriggers audio
   const [tool, setTool] = useState('paint');
 
@@ -533,7 +544,9 @@ function App() {
     : (PALETTES[t.paletteMode] || PALETTES.chromatic);
   const [stepW, setStepW] = useState(22);
   const [scrollLeft, setScrollLeft] = useState(0);
-  const gridSubdiv = { '1/2': 2, '1/4': 4, '1/8': 8, '1/16': 16, '1/32': 32, '1/64': 64 }[t.gridRes] || 16;
+  const gridSubdiv = { '1/2': 2, '1/3': 3, '1/4': 4, '1/6': 6, '1/8': 8, '1/12': 12, '1/16': 16, '1/24': 24, '1/32': 32, '1/64': 64 }[t.gridRes] || 16;
+  // 3/4-style (triplet) resolutions imply 3 beats/bar; everything else is 4/4.
+  const beatsPerBar = (t.gridRes === '1/3' || t.gridRes === '1/6' || t.gridRes === '1/12' || t.gridRes === '1/24') ? 3 : 4;
 
   // Total bars/steps follow the music track when one is loaded
   const TOTAL_BARS = useMemo(() => {
@@ -552,7 +565,24 @@ function App() {
       const dt = (now - last) / 1000; last = now;
       const stepsPerSec = (bpm / 60) * 4;
       setPlayhead((p) => {
-        let np = p + dt * stepsPerSec;
+        let np;
+        const anchor = audioAnchorRef.current;
+        const ctx = audioCtxRef.current;
+        if (anchor && ctx) {
+          // If p was changed externally (scrub) since the last tick, re-anchor to it so
+          // the visual respects the new position. Audio doesn't seek — that's the existing
+          // behavior — but the playhead now reflects where the user clicked.
+          if (anchor.lastP != null && Math.abs(p - anchor.lastP) > 0.01) {
+            anchor.ctxTime = ctx.currentTime;
+            anchor.playhead = p;
+          }
+          // Audio is the clock — derive playhead from ctx.currentTime so visual and audio
+          // can't drift apart and the startup offset between RAF and src.start() vanishes.
+          np = anchor.playhead + (ctx.currentTime - anchor.ctxTime) * stepsPerSec;
+          anchor.lastP = np;
+        } else {
+          np = p + dt * stepsPerSec;
+        }
         // If the playhead has entered a Restart clip on any track, jump back to 0.
         // (On the device this would wait for a button press; in the simulator we just loop.)
         try {
@@ -568,8 +598,14 @@ function App() {
           }
         } catch (e) { /* ignore */ }
         if (np >= TOTAL_STEPS) {
-          np = loop ? 0 : TOTAL_STEPS - 0.001;
-          if (!loop) setPlaying(false);
+          if (loop) {
+            np = 0;
+            // Re-anchor audio so the playhead doesn't immediately re-wrap from a stale ctxTime.
+            setRestartTick(t => t + 1);
+          } else {
+            np = TOTAL_STEPS - 0.001;
+            setPlaying(false);
+          }
         }
         return np;
       });
@@ -633,6 +669,7 @@ function App() {
       audioSourceRef.current.disconnect();
       audioSourceRef.current = null;
     }
+    audioAnchorRef.current = null;
     if (!playing) return;
     if (ctx.state === 'suspended') ctx.resume();
 
@@ -643,8 +680,11 @@ function App() {
     src.buffer = audio.buffer;
     src.connect(ctx.destination);
     const startAt = Math.min(audio.buffer.duration - 0.01, Math.max(0, offsetSec));
-    src.start(0, startAt);
+    // Schedule a hair into the future so the anchor's ctxTime matches actual playback start.
+    const when = ctx.currentTime + 0.05;
+    src.start(when, startAt);
     audioSourceRef.current = src;
+    audioAnchorRef.current = { ctxTime: when, playhead };
 
     return () => {
       if (audioSourceRef.current) {
@@ -652,6 +692,7 @@ function App() {
         audioSourceRef.current.disconnect();
         audioSourceRef.current = null;
       }
+      audioAnchorRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, audio, restartTick]);
@@ -1199,6 +1240,7 @@ function App() {
         tool={tool} setTool={setTool}
         gridRes={t.gridRes} setGridRes={(v) => setTweak('gridRes', v)}
         snapToGrid={snapToGrid} setSnapToGrid={setSnapToGrid}
+        beatsPerBar={beatsPerBar}
         onExport={exportTxt}
         onNewProject={newProject}
         onExportProject={exportProject}
@@ -1243,6 +1285,7 @@ function App() {
             snapToGrid={snapToGrid}
             tool={tool}
             gridSubdiv={gridSubdiv}
+            beatsPerBar={beatsPerBar}
             selectedStepId={selectedStepId}
             setSelectedStepId={setSelectedStepId}
             selectedIds={selectedIds}
@@ -1262,7 +1305,19 @@ function App() {
         </div>
 
         <div className="right">
-          <PreviewStage balls={balls} litState={litState} layout={t.previewLayout} glow={t.ballGlow} cal={cal} />
+          <PreviewStage balls={balls} litState={litState} layout={t.previewLayout} glow={t.ballGlow} cal={cal}
+            playhead={playhead} playing={playing}
+            perfSim={{
+              enabled:     t.perfSimEnabled,
+              pattern:     t.perfSimPattern,
+              radiusPct:   t.perfSimRadiusPct,
+              periodBars:  t.perfSimPeriodBars,
+              handGapPct:  t.perfSimHandGapPct,
+              guides:      t.perfSimGuides,
+              trail:       t.perfSimTrail,
+            }}
+            onPerfSim={setTweak}
+          />
           <Inspector
             step={selectedStep}
             updateStep={updateStep}
@@ -1336,11 +1391,12 @@ function App() {
 }
 
 // ============ TOP BAR ============
-function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, onExport, onNewProject, onExportProject, onImportProject }) {
-  const RESOLUTIONS = ['1/2','1/4','1/8','1/16','1/32','1/64'];
+function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject }) {
+  const RESOLUTIONS = ['1/2','1/3','1/4','1/6','1/8','1/12','1/16','1/24','1/32','1/64'];
+  const stepsPerBeat = 16 / beatsPerBar;
   const bar = Math.floor(playhead / 16) + 1;
-  const beat = Math.floor((playhead % 16) / 4) + 1;
-  const tick = Math.floor(playhead % 4) + 1;
+  const beat = Math.floor((playhead % 16) / stepsPerBeat) + 1;
+  const tick = Math.floor(playhead % stepsPerBeat) + 1;
   const [menuOpen, setMenuOpen] = React.useState(false);
   const menuRef = React.useRef(null);
   const importRef = React.useRef(null);
@@ -1390,7 +1446,7 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         </div>
         <div className="readout">
           <div className="ro-label">SIG</div>
-          <div className="ro-value mono">4/4</div>
+          <div className="ro-value mono">{beatsPerBar}/4</div>
         </div>
       </div>
 
@@ -1677,7 +1733,7 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
+function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
@@ -1881,13 +1937,25 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
       if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      // Anchor zoom under the cursor: keep the step at cursorX stationary by
+      // adjusting scrollLeft once the new step width is applied.
+      const rect = el.getBoundingClientRect();
+      const cursorX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
       // Round to whole pixels — fractional STEP_W makes repeating-linear-gradient
       // stops drift, producing visible gridline misalignment on long songs.
       setStepW((w) => {
         const next = Math.round(w * factor);
-        const clamped = Math.max(6, Math.min(80, next));
+        let clamped = Math.max(6, Math.min(80, next));
         // Round-to-int can stall the zoom when w*factor rounds back to w; nudge it.
-        return clamped === w ? Math.max(6, Math.min(80, w + (factor > 1 ? 1 : -1))) : clamped;
+        if (clamped === w) clamped = Math.max(6, Math.min(80, w + (factor > 1 ? 1 : -1)));
+        if (clamped !== w) {
+          const worldStep = (el.scrollLeft + cursorX) / w;
+          // Apply on the next frame so the timeline has resized first
+          // (scrollLeft is clamped to the current scrollWidth).
+          const targetScroll = Math.max(0, worldStep * clamped - cursorX);
+          requestAnimationFrame(() => { el.scrollLeft = targetScroll; });
+        }
+        return clamped;
       });
     };
     el.addEventListener('wheel', onWheel, { passive: false });
@@ -1927,8 +1995,8 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                       backgroundImage: [
                         // sub-divisions: faint
                         `repeating-linear-gradient(90deg, transparent 0, transparent ${subdivStep * STEP_W - 1}px, var(--border) ${subdivStep * STEP_W - 1}px, var(--border) ${subdivStep * STEP_W}px)`,
-                        // beats (every 4 sub-divisions when cellsPerBar >= 4)
-                        `repeating-linear-gradient(90deg, transparent 0, transparent ${(STEPS_PER_BAR / 4) * STEP_W - 1}px, var(--border-strong) ${(STEPS_PER_BAR / 4) * STEP_W - 1}px, var(--border-strong) ${(STEPS_PER_BAR / 4) * STEP_W}px)`,
+                        // beats: one line per beat within a bar (4 for 4/4, 3 for 3/4)
+                        `repeating-linear-gradient(90deg, transparent 0, transparent ${(STEPS_PER_BAR / beatsPerBar) * STEP_W - 1}px, var(--border-strong) ${(STEPS_PER_BAR / beatsPerBar) * STEP_W - 1}px, var(--border-strong) ${(STEPS_PER_BAR / beatsPerBar) * STEP_W}px)`,
                         // bars: strongest
                         `repeating-linear-gradient(90deg, transparent 0, transparent ${STEPS_PER_BAR * STEP_W - 1}px, var(--text-faint) ${STEPS_PER_BAR * STEP_W - 1}px, var(--text-faint) ${STEPS_PER_BAR * STEP_W}px)`,
                       ].join(', '),
@@ -2037,11 +2105,13 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
   const left = step.start * STEP_W;
   const cmd = COMMANDS.find(c => c.id === step.command);
 
-  // Visual fill per command type. For period-based commands, stripe widths
-  // mirror the firmware's actual on/off/period in pixels (pxPerMs * ms), so
-  // changing ON / OFF / PERIOD in the inspector visibly retunes the clip.
-  // A 2px floor keeps very fast cycles from collapsing into a flat color.
-  const stripePx = (ms, min = 2) => Math.max(min, Math.round((pxPerMs || 0) * ms));
+  // Visual fill per command type. For period-based commands the gradient is
+  // derived from the SAME formulas evalStep uses, so the pattern under the
+  // playhead matches the preview ball exactly when the user changes period /
+  // on / off. Fractional px widths (no Math.round, no min floor) keep the
+  // boundaries pixel-accurate; if a cycle is sub-pixel, the gradient blends
+  // into an average, which is also what the ball perceptually does.
+  const periodPx = (ms) => (pxPerMs || 0) * ms;
   let fill;
   switch (step.command) {
     case 'color':
@@ -2051,33 +2121,57 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
       fill = `repeating-linear-gradient(45deg, #2a2a2a 0 6px, #1a1a1a 6px 12px)`;
       break;
     case 'breathe': {
-      const period = stripePx(clipOnMs(step), 8);
-      const half = Math.max(4, Math.round(period / 2));
-      fill = `repeating-linear-gradient(90deg, ${step.color} 0 ${half}px, ${step.color}66 ${half}px ${period}px)`;
+      // brightness = (1 - cos(2π·phase))/2 ; sample at N stops, darken color by it.
+      const period = Math.max(0.5, periodPx(clipOnMs(step) || 1000));
+      const N = 12;
+      const stops = [];
+      for (let i = 0; i <= N; i++) {
+        const phase = i / N;
+        const b = (1 - Math.cos(2 * Math.PI * phase)) * 0.5;
+        const c = lerpColor('#000000', step.color, b);
+        stops.push(`${c} ${(phase * period).toFixed(3)}px`);
+      }
+      fill = `repeating-linear-gradient(90deg, ${stops.join(', ')})`;
       break;
     }
     case 'blink': {
-      const onPx = stripePx(clipOnMs(step));
-      const offPx = stripePx(clipOffMs(step));
+      const onPx = periodPx(clipOnMs(step));
+      const offPx = periodPx(clipOffMs(step));
       const total = onPx + offPx;
-      fill = `repeating-linear-gradient(90deg, ${step.color} 0 ${onPx}px, ${step.colorB||'#000'} ${onPx}px ${total}px)`;
+      if (total <= 0) { fill = step.color; break; }
+      const b = step.colorB || '#000000';
+      // Hard transitions at on→off and off→on (matches evalStep's phase compare).
+      fill = `repeating-linear-gradient(90deg, ${step.color} 0, ${step.color} ${onPx.toFixed(3)}px, ${b} ${onPx.toFixed(3)}px, ${b} ${total.toFixed(3)}px)`;
       break;
     }
     case 'fade':
       fill = `linear-gradient(90deg, ${step.color}, ${step.colorB||step.color})`;
       break;
     case 'rainbow': {
-      // One full hue sweep per cycle period; tile across the clip width.
-      const period = stripePx(clipOnMs(step), 24);
-      fill = `repeating-linear-gradient(90deg, #ff3b3b 0, #ff8a00 ${Math.round(period * 0.14)}px, #ffc933 ${Math.round(period * 0.28)}px, #3ddc84 ${Math.round(period * 0.42)}px, #22d3ee ${Math.round(period * 0.57)}px, #3b82f6 ${Math.round(period * 0.71)}px, #a855f7 ${Math.round(period * 0.85)}px, #ff3b3b ${period}px)`;
+      // One full hue sweep per cycle period — sample hslToHex(h,1,0.55) to match evalStep.
+      const period = Math.max(0.5, periodPx(clipOnMs(step) || 1000));
+      const N = 12;
+      const stops = [];
+      for (let i = 0; i <= N; i++) {
+        const phase = i / N;
+        stops.push(`${hslToHex(phase * 360, 1, 0.55)} ${(phase * period).toFixed(3)}px`);
+      }
+      fill = `repeating-linear-gradient(90deg, ${stops.join(', ')})`;
       break;
     }
     case 'pingpong': {
-      const period = stripePx(clipOnMs(step), 8);
-      const mid = Math.max(2, Math.round(period / 2));
+      // a = (1 - cos(2π·phase))/2 — same lerp evalStep uses.
+      const period = Math.max(0.5, periodPx(clipOnMs(step) || 1000));
       const a = step.color;
-      const b = step.colorB || step.color;
-      fill = `repeating-linear-gradient(90deg, ${a} 0, ${b} ${mid}px, ${a} ${period}px)`;
+      const bCol = step.colorB || step.color;
+      const N = 12;
+      const stops = [];
+      for (let i = 0; i <= N; i++) {
+        const phase = i / N;
+        const t = (1 - Math.cos(2 * Math.PI * phase)) * 0.5;
+        stops.push(`${lerpColor(a, bCol, t)} ${(phase * period).toFixed(3)}px`);
+      }
+      fill = `repeating-linear-gradient(90deg, ${stops.join(', ')})`;
       break;
     }
     default:
@@ -2102,6 +2196,9 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
     >
       <div className="clip-fill" style={{
         background: fill,
+        // Mirror evalStep's brightness multiplier so the inspector slider visibly
+        // dims the clip the same way it dims the preview ball.
+        filter: `brightness(${Math.max(0, Math.min(1, step.brightness ?? 1))})`,
         boxShadow: 'inset 0 0 0 1px ' + step.color + ', 0 0 8px ' + step.color + '55',
       }}/>
       <div className="clip-label mono">
@@ -2114,22 +2211,614 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
 }
 
 // ============ PREVIEW ============
-function PreviewStage({ balls, litState, layout, glow, cal }) {
+// Performer-sim geometry, all in pixels relative to the stage box. Positions
+// are slot-aware (each performer owns 1/N of the stage width) and capped so
+// adjacent pairs' orbits never intersect.
+//
+// Returns { xPx, yPx } for one ball in canvas coordinates (origin = stage
+// top-left). pivotXPx is the hand pivot for non-weave patterns; centerXPx is
+// the performer center for weave (figure-8).
+function performerBallPos({ pattern, theta, centerXPx, centerYPx, pivotLPx, pivotRPx, rPx, isLeft }) {
+  if (pattern === 'weave') {
+    const ph = isLeft ? theta : theta + Math.PI;
+    return {
+      xPx: centerXPx + Math.cos(ph) * rPx,
+      yPx: centerYPx + Math.sin(2 * ph) * rPx * 0.6,
+    };
+  }
+  let angle, pivotXPx;
+  if (isLeft) {
+    angle = theta;
+    pivotXPx = pivotLPx;
+  } else if (pattern === 'mirror') {
+    angle = -theta;
+    pivotXPx = pivotRPx;
+  } else if (pattern === 'split') {
+    angle = theta + Math.PI;
+    pivotXPx = pivotRPx;
+  } else {
+    angle = theta;
+    pivotXPx = pivotRPx;
+  }
+  return {
+    xPx: pivotXPx + Math.cos(angle) * rPx,
+    yPx: centerYPx + Math.sin(angle) * rPx,
+  };
+}
+
+// Inline icon for the settings popover trigger.
+function GearIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+      strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="8" cy="8" r="2.2"/>
+      <path d="M8 1.5v1.8M8 12.7v1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M1.5 8h1.8M12.7 8h1.8M3.4 12.6l1.3-1.3M11.3 4.7l1.3-1.3"/>
+    </svg>
+  );
+}
+
+// Persistence-of-vision trail layer. Models four perceptual phenomena that
+// dominate how audiences see a moving LED in a dark room:
+//
+//  1. Persistence of vision (Bidwell): the retina holds a signal for ~50–150ms
+//     after light removal, so a fast-moving LED paints a continuous streak.
+//     We approximate this by fading the canvas a constant α per frame (gives
+//     exponential decay) and drawing the LED's path as an interpolated line.
+//  2. Comet head: the *current* position is much brighter than the trail.
+//     We draw a multi-pass radial bloom at the head every frame (small hot
+//     core + saturated mid + soft outer halo).
+//  3. Photopic saturation: bright LEDs desaturate toward white at the core
+//     (cone saturation). The hot core is white; the saturated color shows as
+//     a ring around it.
+//  4. Speed-vs-brightness: a fast LED appears dimmer because its photons are
+//     smeared across more retina per integration window. We scale per-frame
+//     stroke alpha down for fast motion.
+//
+// Decoupled from React renders by its own RAF loop — the canvas paints at
+// monitor rate even when React isn't re-rendering, which matters when the
+// transport is paused (we still want the heads to stay visible) and when
+// React batches updates (we don't want frame-skips that break the streak).
+function TrailCanvas({ balls, litState, positions, cal, trail, playing, playhead, stageSize, zoom, pan }) {
+  const { useRef, useEffect } = React;
+  const canvasRef = useRef(null);
+
+  // Refs kept fresh by the parent's renders. The RAF loop reads from these
+  // so it can run independently of React's reconciliation cadence.
+  const ballsRef     = useRef(balls);
+  const litStateRef  = useRef(litState);
+  const positionsRef = useRef(positions);
+  const calRef       = useRef(cal);
+  const trailRef     = useRef(trail);
+  const playingRef   = useRef(playing);
+  const playheadRef  = useRef(playhead);
+  const zoomRef      = useRef(zoom);
+  const panRef       = useRef(pan);
+  ballsRef.current     = balls;
+  litStateRef.current  = litState;
+  positionsRef.current = positions;
+  calRef.current       = cal;
+  trailRef.current     = trail;
+  playingRef.current   = playing;
+  playheadRef.current  = playhead;
+  zoomRef.current      = zoom;
+  panRef.current       = pan;
+
+  // Sync internal pixel buffer to current stage CSS size + DPR. Runs whenever
+  // the stage resizes (via stageSize prop) so the canvas stays crisp.
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || !stageSize.w || !stageSize.h) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w   = Math.round(stageSize.w * dpr);
+    const h   = Math.round(stageSize.h * dpr);
+    if (cv.width !== w || cv.height !== h) {
+      cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, w, h);
+    }
+  }, [stageSize.w, stageSize.h]);
+
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    let raf;
+    let lastPlayhead = playheadRef.current;
+    const prevHead = {};   // ballId -> {x, y} in canvas px from previous frame
+
+    let lastZoom = zoomRef.current;
+    let lastPan  = panRef.current;
+
+    const tick = () => {
+      const ctx       = cv.getContext('2d');
+      const W = cv.width, H = cv.height;
+      const cssW = cv.clientWidth || (W ? W : 1);
+      const cssH = cv.clientHeight || (H ? H : 1);
+      const dpr       = W > 0 && cssW > 0 ? W / cssW : (window.devicePixelRatio || 1);
+      const balls     = ballsRef.current;
+      const litState  = litStateRef.current;
+      const positions = positionsRef.current;
+      const cal       = calRef.current;
+      const trail     = trailRef.current;
+      const playing   = playingRef.current;
+      const playhead  = playheadRef.current;
+      const zoom      = zoomRef.current;
+      const pan       = panRef.current;
+
+      // Detect a seek (loop, scrub, big jump) so we don't paint a misleading
+      // streak across the seek discontinuity.
+      const dPh  = playhead - lastPlayhead;
+      const seek = dPh < 0 || dPh > 4;
+      lastPlayhead = playhead;
+
+      // Detect a view change (zoom or pan): old streaks were drawn at the
+      // previous transform and would otherwise sit at the wrong world location.
+      const viewChanged = (zoom !== lastZoom) || (pan.x !== lastPan.x) || (pan.y !== lastPan.y);
+      lastZoom = zoom;
+      lastPan  = pan;
+
+      // 1. Fade the canvas in SCREEN space (always identity transform here),
+      //    so trails fade uniformly regardless of zoom/pan. Clear instead
+      //    of fading on a seek or view change.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      const fadeBase = playing ? (0.45 - 0.43 * trail) : 0.10;
+      if (seek || viewChanged) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, W, H);
+        for (const k in prevHead) delete prevHead[k];
+      } else {
+        ctx.fillStyle = `rgba(0,0,0,${fadeBase})`;
+        ctx.fillRect(0, 0, W, H);
+      }
+
+      // 2. Switch to a transform that maps world (CSS px, the same units
+      //    PreviewStage computes positions in) to canvas device pixels with
+      //    user zoom + pan applied. From here on everything we draw is in
+      //    world units — line widths and gradient radii scale with zoom,
+      //    which matches the perceptual "I walked closer" effect.
+      ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, pan.x * dpr, pan.y * dpr);
+
+      // Head sizes in CSS px (world units). Will be scaled by the transform.
+      const headR = Math.max(8, cssH * 0.045);   // saturated mid-bloom radius
+      const haloR = headR * 3.2;                 // outer ocular glare
+      const coreR = headR * 0.35;                // hot white core
+
+      // Additive blend so two LEDs in the same place double up like real photons.
+      ctx.globalCompositeOperation = 'lighter';
+
+      balls.forEach(b => {
+        const pos = positions && positions[b.id];
+        if (!pos) {
+          delete prevHead[b.id];
+          return;
+        }
+
+        const linA = ledToLinearRGB(litState[b.id+'-A'], cal);
+        const linB = ledToLinearRGB(litState[b.id+'-B'], cal);
+        const lr = Math.max(linA[0], linB[0]);
+        const lg = Math.max(linA[1], linB[1]);
+        const lb = Math.max(linA[2], linB[2]);
+        const briLin = Math.max(lr, lg, lb);
+        if (briLin <= 0.001) {
+          delete prevHead[b.id];
+          return;
+        }
+
+        // Positions and prevHead are stored in WORLD CSS px; the transform
+        // handles dpr + zoom + pan.
+        const xPx = pos.xPx;
+        const yPx = pos.yPx;
+
+        // sRGB-encoded color for stroke/fill.
+        const r8 = linearToSrgb8(lr, cal.gamma);
+        const g8 = linearToSrgb8(lg, cal.gamma);
+        const b8 = linearToSrgb8(lb, cal.gamma);
+
+        // 2. Streak: thick gaussian-feathered line from prev head to current head.
+        const prev = prevHead[b.id];
+        if (prev) {
+          const dx = xPx - prev.x, dy = yPx - prev.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          // 4. Speed-vs-brightness: longer per-frame travel → dimmer streak.
+          // Reference travel ≈ headR; longer than that gets attenuated.
+          const speedAtt = Math.min(1, headR / Math.max(headR * 0.5, dist));
+          // Inner sharp line
+          ctx.strokeStyle = `rgba(${r8},${g8},${b8},${0.85 * briLin * speedAtt})`;
+          ctx.lineWidth   = headR * 0.55;
+          ctx.lineCap     = 'round';
+          ctx.beginPath();
+          ctx.moveTo(prev.x, prev.y);
+          ctx.lineTo(xPx, yPx);
+          ctx.stroke();
+          // Outer wide softer line — fakes the perpendicular gaussian width
+          // without an expensive blur filter.
+          ctx.strokeStyle = `rgba(${r8},${g8},${b8},${0.30 * briLin * speedAtt})`;
+          ctx.lineWidth   = headR * 1.4;
+          ctx.beginPath();
+          ctx.moveTo(prev.x, prev.y);
+          ctx.lineTo(xPx, yPx);
+          ctx.stroke();
+        }
+
+        // 3a. Outer ocular glare halo. Radius grows weakly with brightness
+        //     (Stiles–Holladay style); use sqrt for cheap nonlinearity.
+        const haloA = 0.22 * Math.sqrt(briLin);
+        const haloGrad = ctx.createRadialGradient(xPx, yPx, 0, xPx, yPx, haloR);
+        haloGrad.addColorStop(0,    `rgba(${r8},${g8},${b8},${haloA})`);
+        haloGrad.addColorStop(0.35, `rgba(${r8},${g8},${b8},${haloA * 0.4})`);
+        haloGrad.addColorStop(1,    `rgba(${r8},${g8},${b8},0)`);
+        ctx.fillStyle = haloGrad;
+        ctx.beginPath();
+        ctx.arc(xPx, yPx, haloR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 3b. Saturated color mid-bloom.
+        const midGrad = ctx.createRadialGradient(xPx, yPx, 0, xPx, yPx, headR);
+        midGrad.addColorStop(0,   `rgba(${r8},${g8},${b8},${0.95 * briLin})`);
+        midGrad.addColorStop(0.6, `rgba(${r8},${g8},${b8},${0.45 * briLin})`);
+        midGrad.addColorStop(1,   `rgba(${r8},${g8},${b8},0)`);
+        ctx.fillStyle = midGrad;
+        ctx.beginPath();
+        ctx.arc(xPx, yPx, headR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 3c. Hot white core — photopic saturation. White core only appears
+        //     when the LED is bright enough to saturate cones (~ briLin > 0.3).
+        const coreA = Math.max(0, briLin - 0.25) * 1.4;
+        if (coreA > 0) {
+          const coreGrad = ctx.createRadialGradient(xPx, yPx, 0, xPx, yPx, coreR);
+          coreGrad.addColorStop(0, `rgba(255,255,255,${Math.min(1, coreA)})`);
+          coreGrad.addColorStop(1, `rgba(255,255,255,0)`);
+          ctx.fillStyle = coreGrad;
+          ctx.beginPath();
+          ctx.arc(xPx, yPx, coreR, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        prevHead[b.id] = { x: xPx, y: yPx };
+      });
+
+      ctx.globalCompositeOperation = 'source-over';
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(raf);
+    };
+  }, []);   // single mount/unmount; refs deliver fresh data each frame
+
+  return <canvas ref={canvasRef} className="trail-canvas"/>;
+}
+
+function PreviewStage({ balls, litState, layout, glow, cal, playhead, playing, perfSim, onPerfSim }) {
+  const simOn = !!perfSim?.enabled;
+  const stageClass = simOn ? 'layout-performance' : ('layout-' + layout);
+
+  const stageRef = useRef(null);
+  const popoverRef = useRef(null);
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
+  const [showSettings, setShowSettings] = useState(false);
+
+  // Zoom + pan state. Pan is in CSS px applied AFTER the zoom scale, so the
+  // mapping from "world" (geometry) coords to screen is: screen = world*zoom + pan.
+  // Reset to identity whenever sim is toggled off so re-enabling starts fresh.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan]   = useState({ x: 0, y: 0 });
+  const ZOOM_MIN = 0.5, ZOOM_MAX = 8;
+
+  // Refs mirror state so the imperative wheel/drag handlers (attached once)
+  // always read the latest values without re-attaching.
+  const zoomRef  = useRef(zoom);  zoomRef.current  = zoom;
+  const panRef   = useRef(pan);   panRef.current   = pan;
+  const simOnRef = useRef(simOn); simOnRef.current = simOn;
+
+  // Track stage box in CSS px so geometry can be computed in real units.
+  useEffect(() => {
+    if (!stageRef.current) return;
+    const el = stageRef.current;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setStageSize(prev => (prev.w === r.width && prev.h === r.height) ? prev : { w: r.width, h: r.height });
+    };
+    update();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Click-outside to close the settings popover.
+  useEffect(() => {
+    if (!showSettings) return;
+    const onDocClick = (e) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target)) {
+        setShowSettings(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [showSettings]);
+
+  // Reset view when sim toggles off so re-enabling starts at 1:1.
+  useEffect(() => {
+    if (!simOn) { setZoom(1); setPan({ x: 0, y: 0 }); }
+  }, [simOn]);
+
+  // Wheel-zoom anchored on the cursor. Cursor world point stays put, so the
+  // user feels like they're scaling around their pointer rather than the
+  // stage center. Wheel listener has to be {passive:false} to preventDefault.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      if (!simOnRef.current) return;
+      e.preventDefault();
+      const z = zoomRef.current, p = panRef.current;
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      // World point under cursor before zoom.
+      const wx = (mx - p.x) / z;
+      const wy = (my - p.y) / z;
+      // Multiplicative zoom feels uniform across the range.
+      const nz = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * Math.exp(-e.deltaY * 0.0015)));
+      // Recompute pan so cursor world point stays under cursor.
+      setZoom(nz);
+      setPan({ x: mx - wx * nz, y: my - wy * nz });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // Drag-to-pan with left mouse. Refs avoid re-renders mid-drag for the start
+  // anchor; pan itself is state so the BallPreview / guide DOM follows.
+  const dragRef = useRef(null);
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onDown = (e) => {
+      if (!simOnRef.current || e.button !== 0) return;
+      // Don't start a drag if the user clicked on the overlay buttons.
+      if (e.target.closest && e.target.closest('.sim-zoom-overlay')) return;
+      dragRef.current = { mx: e.clientX, my: e.clientY, panX: panRef.current.x, panY: panRef.current.y };
+      el.style.cursor = 'grabbing';
+      e.preventDefault();
+    };
+    const onMove = (e) => {
+      const d = dragRef.current;
+      if (!d) return;
+      setPan({ x: d.panX + (e.clientX - d.mx), y: d.panY + (e.clientY - d.my) });
+    };
+    const onUp = () => {
+      if (!dragRef.current) return;
+      dragRef.current = null;
+      if (el) el.style.cursor = simOnRef.current ? 'grab' : '';
+    };
+    el.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      el.removeEventListener('mousedown', onDown);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
+
+  // Cursor styling reflects whether the stage is grab-able right now.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    el.style.cursor = simOn ? 'grab' : '';
+  }, [simOn]);
+
+  const resetView = () => { setZoom(1); setPan({ x: 0, y: 0 }); };
+  const viewIdentity = (zoom === 1 && pan.x === 0 && pan.y === 0);
+
+  // Performer geometry — slot-aware, pixel-based.
+  // Each performer owns a horizontal slot of width stageW / numPerformers.
+  // handGapPct is now % of slot width (so spacing scales with crowding);
+  // orbit radius is capped so adjacent pairs' circles never intersect.
+  let positions = null;     // ballId -> { xPx, yPx }
+  let guides    = null;     // [{ xPx, yPx, dPx, weave? }]
+  let numPerf   = 0;
+  if (simOn && stageSize.w > 0 && stageSize.h > 0) {
+    positions = {};
+    guides = [];
+    const pairs = [];
+    for (let i = 0; i < balls.length; i += 2) pairs.push(balls.slice(i, i + 2));
+    numPerf = pairs.length;
+    if (numPerf > 0) {
+      const slotW = stageSize.w / numPerf;
+      const cy = stageSize.h / 2;
+      // Hand half-gap: % of slot half-width. At handGapPct=100, pivots sit at
+      // the slot edges (no inner room for orbits → radius caps to 0).
+      const handHalfPx = (perfSim.handGapPct / 100) * (slotW / 2);
+      // Max non-overlapping radius:
+      //   • r ≤ handHalfPx  → left/right orbits within a pair don't overlap
+      //   • r ≤ slotW/2 - handHalfPx → orbits don't bleed into neighbouring slot
+      //   • r ≤ stageH/2 - 6 → orbits don't clip top/bottom
+      const maxRpx = Math.max(0, Math.min(handHalfPx, slotW / 2 - handHalfPx, stageSize.h / 2 - 6));
+      // User radius is % of that max (so the slider reads as "fill the available space").
+      const rPx = (perfSim.radiusPct / 100) * maxRpx;
+
+      const playheadBars = playhead / STEPS_PER_BAR;
+      const theta = (playheadBars / Math.max(0.01, perfSim.periodBars)) * Math.PI * 2;
+
+      pairs.forEach((pair, p) => {
+        const centerXPx = (p + 0.5) * slotW;
+        const pivotLPx  = centerXPx - handHalfPx;
+        const pivotRPx  = centerXPx + handHalfPx;
+        if (pair.length === 1) {
+          positions[pair[0].id] = { xPx: centerXPx, yPx: cy };
+        } else {
+          positions[pair[0].id] = performerBallPos({
+            pattern: perfSim.pattern, theta,
+            centerXPx, centerYPx: cy, pivotLPx, pivotRPx, rPx, isLeft: true,
+          });
+          positions[pair[1].id] = performerBallPos({
+            pattern: perfSim.pattern, theta,
+            centerXPx, centerYPx: cy, pivotLPx, pivotRPx, rPx, isLeft: false,
+          });
+          if (perfSim.guides && rPx > 0) {
+            if (perfSim.pattern === 'weave') {
+              guides.push({ xPx: centerXPx, yPx: cy, dPx: rPx * 2, weave: true });
+            } else {
+              guides.push({ xPx: pivotLPx, yPx: cy, dPx: rPx * 2 });
+              guides.push({ xPx: pivotRPx, yPx: cy, dPx: rPx * 2 });
+            }
+          }
+        }
+      });
+    }
+  }
+
+  const PATTERNS = [
+    { value: 'forward', label: 'Fwd'   },
+    { value: 'mirror',  label: 'Mir'   },
+    { value: 'split',   label: 'Split' },
+    { value: 'weave',   label: 'Weave' },
+  ];
+  const subText = simOn && numPerf > 0
+    ? `${balls.length} balls · ${numPerf} performer${numPerf===1?'':'s'} · ${balls.length*2} LEDs`
+    : `${balls.length} balls · ${balls.length*2} LEDs`;
+
   return (
     <div className="preview">
       <div className="preview-head">
-        <div className="preview-title">LIVE PREVIEW</div>
-        <div className="preview-sub mono">{balls.length} balls · {balls.length*2} LEDs</div>
+        <div className="preview-head-row">
+          <div className="preview-title">LIVE PREVIEW</div>
+          <div className="preview-sub mono">{subText}</div>
+        </div>
+        <div className="preview-controls">
+          <button className={"sim-toggle" + (simOn ? ' on' : '')}
+            onClick={() => onPerfSim('perfSimEnabled', !simOn)}
+            title={simOn ? 'Stop performer simulation' : 'Show what an audience would see'}>
+            <span className="sim-dot"/> Performance sim
+          </button>
+          {simOn && (
+            <>
+              <div className="sim-pattern" role="radiogroup" aria-label="Motion pattern">
+                {PATTERNS.map(p => (
+                  <button key={p.value} role="radio"
+                    aria-checked={perfSim.pattern === p.value}
+                    className={"sim-pattern-btn" + (perfSim.pattern === p.value ? ' on' : '')}
+                    onClick={() => onPerfSim('perfSimPattern', p.value)}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <div className="sim-settings-wrap" ref={popoverRef}>
+                <button className={"sim-gear" + (showSettings ? ' on' : '')}
+                  onClick={() => setShowSettings(s => !s)}
+                  title="Sim settings" aria-label="Sim settings" aria-expanded={showSettings}>
+                  <GearIcon/>
+                </button>
+                {showSettings && (
+                  <div className="sim-popover" role="dialog" aria-label="Sim settings">
+                    <div className="sim-pop-title mono">SIM SETTINGS</div>
+                    <SimSlider label="Radius"   min={0}    max={100} step={1}    value={perfSim.radiusPct}
+                      onChange={v => onPerfSim('perfSimRadiusPct', v)}    unit="%" />
+                    <SimSlider label="Hand gap" min={0}    max={100} step={1}    value={perfSim.handGapPct}
+                      onChange={v => onPerfSim('perfSimHandGapPct', v)}   unit="%" />
+                    <SimSlider label="Bars/rev" min={0.25} max={8}   step={0.25} value={perfSim.periodBars}
+                      onChange={v => onPerfSim('perfSimPeriodBars', v)} />
+                    <SimSlider label="Trail"    min={0}    max={1}   step={0.05} value={perfSim.trail}
+                      onChange={v => onPerfSim('perfSimTrail', v)} />
+                    <label className="sim-checkbox">
+                      <input type="checkbox" checked={!!perfSim.guides}
+                        onChange={e => onPerfSim('perfSimGuides', e.target.checked)} />
+                      <span>Show orbit guides</span>
+                    </label>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
       </div>
-      <div className={"preview-stage layout-"+layout}>
-        {balls.map((b, i) => (
-          <BallPreview key={b.id} ball={b}
-            ledA={litState[b.id+'-A']} ledB={litState[b.id+'-B']}
-            glow={glow} index={i} total={balls.length} layout={layout} cal={cal}
-          />
+      <div ref={stageRef} className={"preview-stage " + stageClass}>
+        {simOn && (
+          <TrailCanvas balls={balls} litState={litState} positions={positions}
+            cal={cal} trail={perfSim.trail} playing={playing} playhead={playhead}
+            stageSize={stageSize} zoom={zoom} pan={pan}/>
+        )}
+        {simOn && guides && guides.map((g, i) => (
+          <React.Fragment key={'g'+i}>
+            <div className={"orbit-guide-ring" + (g.weave ? ' weave' : '')} style={{
+              left:   (g.xPx * zoom + pan.x) + 'px',
+              top:    (g.yPx * zoom + pan.y) + 'px',
+              width:  (g.dPx * zoom) + 'px',
+              height: (g.dPx * zoom) + 'px',
+            }}/>
+            {!g.weave && (
+              <div className="orbit-guide-pivot" style={{
+                left: (g.xPx * zoom + pan.x) + 'px',
+                top:  (g.yPx * zoom + pan.y) + 'px',
+              }}/>
+            )}
+          </React.Fragment>
         ))}
+        {balls.map((b, i) => {
+          const basePos = positions ? positions[b.id] : null;
+          const screenPos = basePos
+            ? { xPx: basePos.xPx * zoom + pan.x, yPx: basePos.yPx * zoom + pan.y }
+            : null;
+          return (
+            <BallPreview key={b.id} ball={b}
+              ledA={litState[b.id+'-A']} ledB={litState[b.id+'-B']}
+              glow={glow} index={i} total={balls.length} layout={layout} cal={cal}
+              position={screenPos}
+            />
+          );
+        })}
+        {simOn && (
+          <div className="sim-zoom-overlay mono"
+               onMouseDown={e => e.stopPropagation()}
+               title="Wheel to zoom · drag stage to pan">
+            <button className="sim-zoom-btn" onClick={() => {
+              const z = zoom;
+              const cx = stageSize.w / 2, cy = stageSize.h / 2;
+              const wx = (cx - pan.x) / z, wy = (cy - pan.y) / z;
+              const nz = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * 0.8));
+              setZoom(nz); setPan({ x: cx - wx * nz, y: cy - wy * nz });
+            }} title="Zoom out" aria-label="Zoom out">−</button>
+            <span className="sim-zoom-pct">{Math.round(zoom * 100)}%</span>
+            <button className="sim-zoom-btn" onClick={() => {
+              const z = zoom;
+              const cx = stageSize.w / 2, cy = stageSize.h / 2;
+              const wx = (cx - pan.x) / z, wy = (cy - pan.y) / z;
+              const nz = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * 1.25));
+              setZoom(nz); setPan({ x: cx - wx * nz, y: cy - wy * nz });
+            }} title="Zoom in" aria-label="Zoom in">+</button>
+            <button className={"sim-zoom-reset" + (viewIdentity ? ' dim' : '')}
+                    onClick={resetView}
+                    disabled={viewIdentity}
+                    title="Reset view (1:1)" aria-label="Reset view">Fit</button>
+          </div>
+        )}
       </div>
     </div>
+  );
+}
+
+// Compact slider used inside the sim settings popover. Plain HTML range so we
+// don't depend on the Tweaks panel internals.
+function SimSlider({ label, min, max, step, value, onChange, unit }) {
+  const display = (typeof value === 'number') ? (Number.isInteger(step) ? value : Number(value).toFixed(2)) : value;
+  return (
+    <label className="sim-slider">
+      <div className="sim-slider-row">
+        <span className="sim-slider-lbl">{label}</span>
+        <span className="sim-slider-val mono">{display}{unit||''}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={e => onChange(Number(e.target.value))} />
+    </label>
   );
 }
 
@@ -2139,7 +2828,7 @@ const A_POS = { x: 0.32, y: 0.28 };
 const B_POS = { x: 0.68, y: 0.72 };
 const CANVAS_PX = 64; // logical pixels per ball; CSS upscales it
 
-function BallPreview({ ball, ledA, ledB, glow, index, total, layout, cal }) {
+function BallPreview({ ball, ledA, ledB, glow, index, total, layout, cal, position }) {
   const { useRef, useEffect } = React;
   const canvasRef = useRef(null);
 
@@ -2209,7 +2898,16 @@ function BallPreview({ ball, ledA, ledB, glow, index, total, layout, cal }) {
   }, [linA[0], linA[1], linA[2], linB[0], linB[1], linB[2], cal.gamma, cal.diffuser?.sigmaPct]);
 
   let style = {};
-  if (layout === 'circle') {
+  if (position) {
+    // Performer simulation overrides any layout positioning. Coordinates are
+    // measured stage pixels so orbits stay circular regardless of stage size.
+    style = {
+      position: 'absolute',
+      left: position.xPx + 'px',
+      top:  position.yPx + 'px',
+      transform: 'translate(-50%, -50%)',
+    };
+  } else if (layout === 'circle') {
     const angle = (index / total) * Math.PI * 2 - Math.PI/2;
     const r = 38;
     style = {

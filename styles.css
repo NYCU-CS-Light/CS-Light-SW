@@ -558,9 +558,111 @@ input { font-family: inherit; }
   padding: 14px;
   background: linear-gradient(180deg, var(--surface-2), var(--surface-1));
 }
-.preview-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.preview-head { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.preview-head-row { display: flex; align-items: baseline; justify-content: space-between; }
 .preview-title { font-size: 10px; letter-spacing: 0.18em; color: var(--text-dim); font-family: var(--mono); }
 .preview-sub { font-size: 9px; color: var(--text-faint); }
+
+/* ---- Performance-sim controls (header inline) ---- */
+.preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sim-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 10px;
+  font: 500 10.5px/1 var(--mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.sim-toggle:hover { color: var(--text); border-color: var(--text-dim); }
+.sim-toggle .sim-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: rgba(255,255,255,0.18);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.25);
+  transition: background .15s, box-shadow .15s;
+}
+.sim-toggle.on { color: #ffd28c; border-color: rgba(255,180,80,0.55); background: rgba(255,180,80,0.07); }
+.sim-toggle.on .sim-dot {
+  background: #ffb060;
+  box-shadow: 0 0 6px rgba(255,176,96,0.85), inset 0 0 0 1px rgba(255,220,180,0.9);
+}
+
+.sim-pattern {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  height: 24px;
+}
+.sim-pattern-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 0 8px;
+  height: 100%;
+  font: 500 10px/1 var(--mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  border-right: 1px solid var(--border);
+  transition: color .12s, background .12s;
+}
+.sim-pattern-btn:last-child { border-right: 0; }
+.sim-pattern-btn:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.sim-pattern-btn.on { color: #ffd28c; background: rgba(255,180,80,0.10); }
+
+.sim-settings-wrap { position: relative; margin-left: auto; }
+.sim-gear {
+  appearance: none;
+  width: 24px; height: 24px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: color .12s, border-color .12s, background .12s;
+}
+.sim-gear:hover, .sim-gear.on { color: var(--text); border-color: var(--text-dim); background: rgba(255,255,255,0.04); }
+
+.sim-popover {
+  position: absolute;
+  right: 0; top: calc(100% + 6px);
+  z-index: 50;
+  min-width: 220px;
+  padding: 10px 12px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.sim-pop-title {
+  font-size: 9px; letter-spacing: 0.18em; color: var(--text-faint);
+  margin-bottom: 2px;
+}
+.sim-slider { display: flex; flex-direction: column; gap: 4px; }
+.sim-slider-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  font-size: 10px; color: var(--text-dim);
+}
+.sim-slider-val { font-size: 10px; color: var(--text-faint); }
+.sim-slider input[type="range"] { width: 100%; accent-color: #ffb060; }
+.sim-checkbox {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; color: var(--text-dim);
+  cursor: pointer;
+  margin-top: 2px;
+}
+.sim-checkbox input { accent-color: #ffb060; }
 .preview-stage {
   height: 220px;
   background: radial-gradient(circle at 50% 60%, oklch(0.18 0.01 60), oklch(0.10 0.01 60));
@@ -574,6 +676,112 @@ input { font-family: inherit; }
 .preview-stage.layout-line { flex-direction: row; gap: 8px; flex-wrap: wrap; }
 .preview-stage.layout-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; place-items: center; }
 .preview-stage.layout-circle { display: block; }
+.preview-stage.layout-performance {
+  display: block;
+  height: 320px;
+  /* Real performance happens in the dark — drop the lighter radial gradient
+     so the trails read with full contrast. */
+  background: #050505;
+}
+/* In sim mode the trail canvas IS the light. The stylized orb with its
+   specular highlights and shell would otherwise read as a static physical
+   object stuck on top of the moving streak. Hide it; keep a small label so
+   choreographers can still tell which trail is which ball. */
+.preview-stage.layout-performance .ball-orb { display: none; }
+.preview-stage.layout-performance .ball-prev {
+  pointer-events: none;
+  gap: 0;
+}
+.preview-stage.layout-performance .ball-prev-label {
+  font-size: 8px;
+  color: rgba(255,255,255,0.45);
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 4px rgba(0,0,0,0.9);
+  margin-top: 14px;
+}
+.preview-stage .trail-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+}
+.preview-stage .orbit-guide-ring,
+.preview-stage .orbit-guide-pivot { z-index: 1; }
+.preview-stage .ball-prev { z-index: 2; }
+.preview-stage .sim-zoom-overlay { z-index: 5; }
+
+/* Floating zoom widget (only rendered while sim is on) */
+.sim-zoom-overlay {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  background: rgba(0,0,0,0.55);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 7px;
+  font-size: 10px;
+  color: rgba(255,255,255,0.7);
+  user-select: none;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.sim-zoom-overlay button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  letter-spacing: 0.04em;
+}
+.sim-zoom-btn {
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  font-size: 13px; line-height: 1;
+}
+.sim-zoom-btn:hover { background: rgba(255,255,255,0.10); color: #fff; }
+.sim-zoom-pct {
+  min-width: 36px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255,255,255,0.85);
+}
+.sim-zoom-reset {
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.sim-zoom-reset:hover:not(:disabled) { background: rgba(255,255,255,0.10); color: #fff; }
+.sim-zoom-reset.dim, .sim-zoom-reset:disabled {
+  color: rgba(255,255,255,0.30);
+  cursor: default;
+}
+.preview-stage .orbit-guide-ring {
+  position: absolute;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 50%;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.preview-stage .orbit-guide-ring.weave { border-style: dashed; opacity: 0.6; }
+.preview-stage .orbit-guide-pivot {
+  position: absolute;
+  width: 4px; height: 4px;
+  background: rgba(255,255,255,0.25);
+  border-radius: 50%;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
 
 .ball-prev { display: flex; flex-direction: column; align-items: center; gap: 3px; }
 .ball-orb {
