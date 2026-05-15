@@ -99,6 +99,24 @@ input { font-family: inherit; }
 .brand-mark span:nth-child(3) { background: oklch(0.74 0.16 320); box-shadow: 0 0 8px oklch(0.74 0.16 320); }
 .brand-title { font-size: 13px; font-weight: 700; letter-spacing: 0.18em; }
 .brand-sub { font-size: 9px; color: var(--text-faint); letter-spacing: 0.14em; text-transform: uppercase; font-family: var(--mono); }
+/* Inline-editable project name in the top bar. Borderless until focused
+   so it reads as a label, not a form field. */
+.project-name {
+  width: 200px;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 2px 4px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s, color 0.15s;
+}
+.project-name:hover { color: var(--text); border-bottom-color: rgba(255,255,255,0.15); }
+.project-name:focus { color: var(--text); border-bottom-color: rgba(255,255,255,0.4); }
 
 .transport { display: flex; gap: 4px; }
 .tbtn {

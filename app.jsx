@@ -141,6 +141,14 @@ function cryptoId() {
   return 's' + Math.random().toString(36).slice(2, 10);
 }
 
+// Strip characters that Windows / macOS / Linux refuse in filenames so
+// projectName-derived downloads always succeed. Empty input falls back to
+// 'Untitled' rather than producing a "" filename.
+function sanitizeFilename(s) {
+  const cleaned = (s || '').replace(/[\\/:*?"<>|]/g, '_').trim();
+  return cleaned || 'Untitled';
+}
+
 function seedSteps() {
   const out = {};
   initialBalls.forEach((b) => {
@@ -538,11 +546,12 @@ function App() {
   const audioAnchorRef = useRef(null);
   const [restartTick, setRestartTick] = useState(0); // bumped when Restart clip is hit, retriggers audio
   const [tool, setTool] = useState('paint');
+  const [projectName, setProjectName] = useState('Untitled');
 
   // ---------- Undo / redo ----------
   // Live ref of project state so history helpers don't re-bind every render.
-  const projectStateRef = useRef({ balls, steps, bpm });
-  useEffect(() => { projectStateRef.current = { balls, steps, bpm }; }, [balls, steps, bpm]);
+  const projectStateRef = useRef({ balls, steps, bpm, projectName });
+  useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName }; }, [balls, steps, bpm, projectName]);
   const historyRef = useRef({ past: [], future: [] });
   const HISTORY_CAP = 100;
   const pushHistory = useCallback(() => {
@@ -554,6 +563,7 @@ function App() {
     setBalls(snap.balls);
     setSteps(snap.steps);
     setBpm(snap.bpm);
+    if (typeof snap.projectName === 'string') setProjectName(snap.projectName);
     setSelectedStepId(null);
     setSelectedIds(new Set());
   }, []);
@@ -928,6 +938,7 @@ function App() {
     setBalls(initialBalls);
     setSteps(emptySteps);
     setBpm(120);
+    setProjectName('Untitled');
     setPlayhead(0);
     setPlaying(false);
     setSelectedStepId(null);
@@ -939,7 +950,8 @@ function App() {
   const exportProject = useCallback(() => {
     const payload = {
       kind: 'lbproj',
-      version: 1,
+      version: 2,
+      name: projectName,
       bpm,
       balls,
       steps,
@@ -951,10 +963,10 @@ function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'lightseq_' + Date.now() + '.lbproj';
+    a.download = sanitizeFilename(projectName) + '.lbproj';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [bpm, balls, steps, audio, t]);
+  }, [projectName, bpm, balls, steps, audio, t]);
 
   // Import a .lbproj. Restores balls/steps/bpm/tweaks; audio must be re-imported separately.
   const importProject = useCallback((file) => {
@@ -967,6 +979,14 @@ function App() {
         if (data.balls) setBalls(data.balls);
         if (data.steps) setSteps(data.steps);
         if (typeof data.bpm === 'number') setBpm(data.bpm);
+        // v2 stores name. v1 has no name field — fall back to the file name
+        // (minus the extension) so reopened older projects still get something
+        // sensible in the title bar.
+        if (typeof data.name === 'string' && data.name) {
+          setProjectName(data.name);
+        } else if (file && file.name) {
+          setProjectName(file.name.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
+        }
         if (data.tweaks) {
           for (const k in data.tweaks) setTweak(k, data.tweaks[k]);
         }
@@ -1169,11 +1189,11 @@ function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'lightseq_export_' + Date.now() + '.zip';
+      a.download = sanitizeFilename(projectName) + '_export.zip';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
     });
-  }, [balls, steps, bpm]);
+  }, [balls, steps, bpm, projectName]);
 
   const onEraseAt = useCallback((trackKey, atStep) => {
     setSteps(prev => {
@@ -1307,6 +1327,8 @@ function App() {
         onExportProject={exportProject}
         onImportProject={importProject}
         pushHistory={pushHistory}
+        projectName={projectName}
+        setProjectName={setProjectName}
       />
 
       <CommandBar
@@ -1454,7 +1476,7 @@ function App() {
 }
 
 // ============ TOP BAR ============
-function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject, pushHistory }) {
+function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject, pushHistory, projectName, setProjectName }) {
   const RESOLUTIONS = ['1/2','1/3','1/4','1/6','1/8','1/12','1/16','1/24','1/32','1/64'];
   const stepsPerBeat = 16 / beatsPerBar;
   const bar = Math.floor(playhead / 16) + 1;
@@ -1480,7 +1502,22 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         <div className="brand-mark"><span/><span/><span/></div>
         <div className="brand-text">
           <div className="brand-title">LIGHTSEQ</div>
-          <div className="brand-sub">LED Sequencer · Studio</div>
+          <input className="project-name mono" type="text"
+            value={projectName ?? ''}
+            spellCheck={false}
+            maxLength={64}
+            placeholder="Untitled"
+            title="Project name (used as the saved filename)"
+            onFocus={() => pushHistory && pushHistory()}
+            onChange={(e) => setProjectName && setProjectName(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter or Esc dismisses the field instead of inserting a newline.
+              if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
+            }}
+            onBlur={(e) => {
+              const v = (e.target.value || '').trim();
+              if (!v && setProjectName) setProjectName('Untitled');
+            }} />
         </div>
       </div>
 
