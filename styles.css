@@ -495,6 +495,33 @@ input { font-family: inherit; }
   pointer-events: none;
   z-index: 5;
 }
+.wave-clip {
+  user-select: none;
+  border-left: 1px solid rgba(255,255,255,0.18);
+  border-right: 1px solid rgba(255,255,255,0.18);
+  background: rgba(255,255,255,0.02);
+}
+.wave-clip:hover { background: rgba(255,255,255,0.04); }
+body.dragging .wave-clip { cursor: grabbing; }
+.wave-trim-handle {
+  position: absolute; top: 0; bottom: 0;
+  width: 6px;
+  background: rgba(255,255,255,0.12);
+  cursor: ew-resize;
+  z-index: 4;
+}
+.wave-trim-handle:hover { background: var(--accent); }
+.wave-trim-start { left: 0; }
+.wave-trim-end { right: 0; }
+.wave-volume {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 4px;
+  font-size: 9px; color: var(--text-faint); letter-spacing: 0.12em;
+}
+.wave-volume input[type="range"] {
+  flex: 1; min-width: 0; height: 14px;
+  accent-color: var(--accent);
+}
 
 /* ================== TIMELINE ================== */
 .center { display: flex; flex-direction: column; }

@@ -598,9 +598,11 @@ function App() {
   // Total bars/steps follow the music track when one is loaded
   const TOTAL_BARS = useMemo(() => {
     if (!audio) return DEFAULT_TOTAL_BARS;
-    // bars = duration_sec * (bpm/60) / 4  (one bar = 4 beats)
-    const bars = (audio.durationSec * bpm / 60) / 4;
-    return Math.max(1, Math.ceil(bars));
+    const stepsPerSec = (bpm / 60) * 4;
+    const playableLen = Math.max(0, audio.durationSec - (audio.trimStartSec ?? 0) - (audio.trimEndSec ?? 0));
+    const endStep = (audio.startStep ?? 0) + playableLen * stepsPerSec;
+    const bars = endStep / STEPS_PER_BAR;
+    return Math.max(DEFAULT_TOTAL_BARS, Math.ceil(bars));
   }, [audio, bpm]);
   const TOTAL_STEPS = TOTAL_BARS * STEPS_PER_BAR;
 
@@ -615,7 +617,7 @@ function App() {
         let np;
         const anchor = audioAnchorRef.current;
         const ctx = audioCtxRef.current;
-        if (anchor && ctx) {
+        if (anchor && ctx && ctx.currentTime >= anchor.ctxTime) {
           // If p was changed externally (scrub) since the last tick, re-anchor to it so
           // the visual respects the new position. Audio doesn't seek — that's the existing
           // behavior — but the playhead now reflects where the user clicked.
@@ -628,6 +630,9 @@ function App() {
           np = anchor.playhead + (ctx.currentTime - anchor.ctxTime) * stepsPerSec;
           anchor.lastP = np;
         } else {
+          // No anchor yet (or audio is still in its silent-wait window before src.start()
+          // fires) — advance the visual playhead by wall-clock dt so transport keeps
+          // moving toward the clip's startStep.
           np = p + dt * stepsPerSec;
         }
         // If the playhead has entered a Restart clip on any track, jump back to 0.
@@ -703,10 +708,23 @@ function App() {
       peaks,
       durationSec: buffer.duration,
       buffer,
+      startStep: 0,
+      trimStartSec: 0,
+      trimEndSec: 0,
+      gain: 1,
     });
   }, []);
 
-  // Start/stop audio with transport
+  // Apply a partial patch to the loaded audio (clip moves, trim, volume).
+  // Re-anchors the playback clock so visual/audio don't desync mid-edit.
+  const updateAudio = useCallback((patch) => {
+    setAudio(prev => prev ? { ...prev, ...patch } : prev);
+  }, []);
+
+  // Start/stop audio with transport. Routes the buffer through a GainNode so
+  // the per-clip volume slider can shape playback without re-decoding. Honors
+  // startStep / trimStartSec / trimEndSec so a clip dragged to start at bar 2
+  // waits silently then enters at its trim-in point and stops at trim-out.
   useEffect(() => {
     if (!audio || !audioCtxRef.current) return;
     const ctx = audioCtxRef.current;
@@ -720,23 +738,54 @@ function App() {
     if (!playing) return;
     if (ctx.state === 'suspended') ctx.resume();
 
-    // map current playhead (steps) -> seconds in song
     const stepsPerSec = (bpm / 60) * 4;
-    const offsetSec = playhead / stepsPerSec;
+    const startStep = audio.startStep ?? 0;
+    const trimStart = audio.trimStartSec ?? 0;
+    const trimEnd = audio.trimEndSec ?? 0;
+    const playableLen = Math.max(0, audio.durationSec - trimStart - trimEnd);
+    const audioEndStep = startStep + playableLen * stepsPerSec;
+
+    // Don't schedule if playhead is already past the clip's end window.
+    if (playhead >= audioEndStep) return;
+
     const src = ctx.createBufferSource();
     src.buffer = audio.buffer;
-    src.connect(ctx.destination);
-    const startAt = Math.min(audio.buffer.duration - 0.01, Math.max(0, offsetSec));
-    // Schedule a hair into the future so the anchor's ctxTime matches actual playback start.
-    const when = ctx.currentTime + 0.05;
-    src.start(when, startAt);
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = audio.gain ?? 1;
+    src.connect(gainNode).connect(ctx.destination);
+
+    // when = clock time we schedule playback to start
+    // bufferOffset = position inside the decoded buffer to start at
+    // remaining = audible duration scheduled (so we stop at trimEnd)
+    let when, bufferOffset, remaining;
+    if (playhead < startStep) {
+      // Wait silently then enter at the trim-in point.
+      when = ctx.currentTime + (startStep - playhead) / stepsPerSec + 0.05;
+      bufferOffset = trimStart;
+      remaining = playableLen;
+    } else {
+      // Already past the clip's start — enter mid-buffer.
+      const into = (playhead - startStep) / stepsPerSec;
+      when = ctx.currentTime + 0.05;
+      bufferOffset = trimStart + into;
+      remaining = Math.max(0, playableLen - into);
+    }
+    try {
+      src.start(when, bufferOffset);
+      if (remaining > 0) src.stop(when + remaining);
+    } catch {
+      // Fall back to playing without a precise end if the runtime objects.
+      try { src.start(when, bufferOffset); } catch {}
+    }
     audioSourceRef.current = src;
+    audioSourceRef.current._gain = gainNode;
     audioAnchorRef.current = { ctxTime: when, playhead };
 
     return () => {
       if (audioSourceRef.current) {
         try { audioSourceRef.current.stop(); } catch {}
         audioSourceRef.current.disconnect();
+        try { audioSourceRef.current._gain?.disconnect(); } catch {}
         audioSourceRef.current = null;
       }
       audioAnchorRef.current = null;
@@ -1413,6 +1462,10 @@ function App() {
             stepW={stepW}
             setStepW={setStepW}
             scrollLeft={scrollLeft}
+            snapToGrid={snapToGrid}
+            gridSubdiv={gridSubdiv}
+            updateAudio={updateAudio}
+            pushHistory={pushHistory}
           />
           <Timeline
             balls={balls}
@@ -1759,13 +1812,22 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
 }
 
 // ============ WAVEFORM TRACK ============
-function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onClear, totalBars, totalSteps, stepW, setStepW, scrollLeft }) {
+function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onClear, totalBars, totalSteps, stepW, setStepW, scrollLeft, snapToGrid, gridSubdiv, updateAudio, pushHistory }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const fileRef = useRef(null);
+  // Drag state lives in a ref so the window listeners can read the latest
+  // origin/mode without re-binding on every move event.
+  const dragRef = useRef(null);
+  const [, setDragTick] = useState(0);
+
+  const STEP_W = stepW;
+  const totalW = STEP_W * TOTAL_STEPS;
+  const stepsPerSec = (bpm / 60) * 4;
+
   // Use imported peaks if present, otherwise a deterministic fake
-  const wave = useMemo(() => {
-    if (audio && audio.peaks) return audio.peaks;
+  const fakeWave = useMemo(() => {
+    if (audio && audio.peaks) return null;
     const N = 256;
     const out = [];
     for (let i = 0; i < N; i++) {
@@ -1780,30 +1842,85 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
     return out;
   }, [audio]);
 
-  const STEP_W = stepW;
-  const totalW = STEP_W * TOTAL_STEPS;
-  // Audio occupies only its real duration in steps; the rest of the timeline is silence.
-  const audioSteps = audio
-    ? (audio.durationSec * bpm / 60) * (STEPS_PER_BAR / 4)  // sec * beats/sec * steps/beat
-    : TOTAL_STEPS;
-  const audioW = Math.min(totalW, STEP_W * audioSteps);
+  // Audio clip geometry derived from current trim/startStep. Peaks are sliced
+  // to the audible window so the displayed waveform always matches what plays.
+  const startStep = audio ? (audio.startStep ?? 0) : 0;
+  const trimStart = audio ? (audio.trimStartSec ?? 0) : 0;
+  const trimEnd = audio ? (audio.trimEndSec ?? 0) : 0;
+  const audibleSec = audio ? Math.max(0, audio.durationSec - trimStart - trimEnd) : 0;
+  const audioW = audio ? audibleSec * stepsPerSec * STEP_W : totalW;
+  const audioLeft = audio ? startStep * STEP_W : 0;
+  const displayPeaks = useMemo(() => {
+    if (!audio || !audio.peaks) return fakeWave || [];
+    const peaks = audio.peaks;
+    const lo = Math.max(0, Math.min(1, trimStart / audio.durationSec));
+    const hi = Math.max(0, Math.min(1, 1 - trimEnd / audio.durationSec));
+    if (hi <= lo) return [];
+    const a = Math.floor(lo * peaks.length);
+    const b = Math.max(a + 1, Math.ceil(hi * peaks.length));
+    return peaks.slice(a, b);
+  }, [audio, trimStart, trimEnd, fakeWave]);
 
-  const onScrub = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const setFromX = (clientX) => {
-      const x = clientX - rect.left;
-      setPlayhead(Math.max(0, Math.min(TOTAL_STEPS, x / STEP_W)));
+  const snapStep = (step) => {
+    if (!snapToGrid) return step;
+    const sub = STEPS_PER_BAR / gridSubdiv;
+    return Math.round(step / sub) * sub;
+  };
+
+  const beginDrag = (e, mode) => {
+    if (!audio) return;
+    e.stopPropagation();
+    e.preventDefault();
+    pushHistory && pushHistory();
+    dragRef.current = {
+      mode,
+      startX: e.clientX,
+      origStartStep: startStep,
+      origTrimStart: trimStart,
+      origTrimEnd: trimEnd,
+      origDuration: audio.durationSec,
     };
-    setFromX(e.clientX);
     document.body.classList.add('dragging');
-    const onMove = (ev) => setFromX(ev.clientX);
+    const onMove = (ev) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const dxSteps = (ev.clientX - d.startX) / STEP_W;
+      if (d.mode === 'audio-move') {
+        const next = Math.max(0, snapStep(d.origStartStep + dxSteps));
+        updateAudio({ startStep: next });
+      } else if (d.mode === 'audio-trim-start') {
+        // Dragging the left edge: right end stays anchored, so trimStart and
+        // startStep increase in lockstep by the same step delta.
+        const wantStartStep = snapStep(d.origStartStep + dxSteps);
+        const deltaSteps = wantStartStep - d.origStartStep;
+        const deltaSec = deltaSteps / stepsPerSec;
+        const maxTrimStart = d.origDuration - d.origTrimEnd - 0.05;
+        const newTrimStart = Math.max(0, Math.min(maxTrimStart, d.origTrimStart + deltaSec));
+        const appliedDeltaSec = newTrimStart - d.origTrimStart;
+        const appliedDeltaSteps = appliedDeltaSec * stepsPerSec;
+        const newStartStep = Math.max(0, d.origStartStep + appliedDeltaSteps);
+        updateAudio({ startStep: newStartStep, trimStartSec: newTrimStart });
+      } else if (d.mode === 'audio-trim-end') {
+        // Right edge moves; trimEnd grows when dragging left.
+        const dxSec = -dxSteps / stepsPerSec;
+        const maxTrimEnd = d.origDuration - d.origTrimStart - 0.05;
+        const newTrimEnd = Math.max(0, Math.min(maxTrimEnd, d.origTrimEnd + dxSec));
+        updateAudio({ trimEndSec: newTrimEnd });
+      }
+      setDragTick(t => t + 1);
+    };
     const onUp = () => {
+      dragRef.current = null;
+      document.body.classList.remove('dragging');
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
-      document.body.classList.remove('dragging');
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  };
+
+  const onVolume = (e) => {
+    updateAudio({ gain: parseFloat(e.target.value) });
   };
 
   return (
@@ -1831,25 +1948,41 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
             }}
           />
         </div>
+        {audio && (
+          <div className="wave-volume mono" title="Volume">
+            <span>VOL</span>
+            <input
+              type="range"
+              min="0" max="1.5" step="0.01"
+              value={audio.gain ?? 1}
+              onFocus={() => pushHistory && pushHistory()}
+              onChange={onVolume}
+            />
+          </div>
+        )}
       </div>
       <div className="wave-viewport">
         <div className="wave-rail" style={{ width: totalW, transform: `translateX(${-scrollLeft}px)` }}>
-          <div className="wave-canvas" onMouseDown={onScrub} style={{ width: totalW }}>
-          {/* Waveform content layer — sized to actual audio duration so peaks align with beats. */}
-          <div className="wave-content" style={{ width: audioW, position: 'absolute', left: 0, top: 0, bottom: 0 }}>
+          <div className="wave-canvas" style={{ width: totalW }}>
+          {/* Audio clip — positioned by startStep, sized by audible (trimmed) length.
+              Body is draggable to move; left/right edges are trim handles. */}
+          <div
+            className="wave-clip"
+            style={{ position: 'absolute', left: audioLeft, top: 0, bottom: 0, width: Math.max(8, audioW), cursor: audio ? 'grab' : 'default' }}
+            onMouseDown={(e) => audio && beginDrag(e, 'audio-move')}>
           {style === 'bars' && (
             <div className="wave-bars">
-              {wave.map((v, i) => (
+              {displayPeaks.map((v, i) => (
                 <div key={i} className="wave-bar" style={{ height: (v*100).toFixed(0)+'%' }}/>
               ))}
             </div>
           )}
-          {style === 'wave' && (
-            <svg className="wave-svg" viewBox={`0 0 ${wave.length} 100`} preserveAspectRatio="none">
+          {style === 'wave' && displayPeaks.length > 1 && (
+            <svg className="wave-svg" viewBox={`0 0 ${displayPeaks.length} 100`} preserveAspectRatio="none">
               <path
-                d={"M 0 50 " + wave.map((v,i) => `L ${i} ${50 - v*45}`).join(' ') +
-                   " L " + wave.length + " 50 " +
-                   wave.map((v,i) => `L ${wave.length-i-1} ${50 + wave[wave.length-i-1]*45}`).join(' ') + " Z"}
+                d={"M 0 50 " + displayPeaks.map((v,i) => `L ${i} ${50 - v*45}`).join(' ') +
+                   " L " + displayPeaks.length + " 50 " +
+                   displayPeaks.map((v,i) => `L ${displayPeaks.length-i-1} ${50 + displayPeaks[displayPeaks.length-i-1]*45}`).join(' ') + " Z"}
                 fill="url(#wgrad)"/>
               <defs>
                 <linearGradient id="wgrad" x1="0" y1="0" x2="0" y2="1">
@@ -1861,7 +1994,7 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
           )}
           {style === 'spec' && (
             <div className="wave-spec">
-              {wave.map((v, i) => (
+              {displayPeaks.map((v, i) => (
                 <div key={i} className="wave-spec-col" style={{
                   background: `linear-gradient(180deg,
                     hsl(${280 - v*200} 90% 60%) 0%,
@@ -1870,6 +2003,14 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
                 }}/>
               ))}
             </div>
+          )}
+          {audio && (
+            <>
+              <div className="wave-trim-handle wave-trim-start"
+                onMouseDown={(e) => beginDrag(e, 'audio-trim-start')} title="Trim start"/>
+              <div className="wave-trim-handle wave-trim-end"
+                onMouseDown={(e) => beginDrag(e, 'audio-trim-end')} title="Trim end"/>
+            </>
           )}
           </div>
           {/* beat ticks */}
