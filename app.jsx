@@ -791,6 +791,25 @@ function App() {
     return true;
   }, []);
 
+  // Resize every clip in `group` by the same length delta. Per-clip we clamp
+  // to ≥1 step and stop the clip from sliding past TOTAL_STEPS so the dragged
+  // master can't push the others off the timeline. Single setSteps so the
+  // batch lands atomically.
+  const bulkResizeGroup = useCallback((group, dLen) => {
+    setSteps(prev => {
+      const idToNew = new Map();
+      for (const m of group) {
+        const newLen = Math.max(1, Math.min(TOTAL_STEPS - m.origStart, m.origLength + dLen));
+        idToNew.set(m.id, newLen);
+      }
+      const out = {};
+      for (const k in prev) {
+        out[k] = prev[k].map(s => idToNew.has(s.id) ? { ...s, length: idToNew.get(s.id) } : s);
+      }
+      return out;
+    });
+  }, [TOTAL_STEPS]);
+
   // Bulk re-place a group of clips for cross-track multi-clip drag. Each member
   // returns to its drag-start clip data, then is repositioned by `dStart` on
   // the time axis and `rdTracks` on the track axis. Done in one setSteps so
@@ -1379,6 +1398,7 @@ function App() {
             updateStep={updateStep}
             moveStepToTrack={moveStepToTrack}
             bulkMoveGroup={bulkMoveGroup}
+            bulkResizeGroup={bulkResizeGroup}
             deleteStepById={deleteStepById}
             totalBars={TOTAL_BARS}
             totalSteps={TOTAL_STEPS}
@@ -1834,7 +1854,7 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll, pushHistory }) {
+function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, bulkResizeGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll, pushHistory }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
@@ -1969,14 +1989,23 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
         const maxEnd = TOTAL_STEPS;
         const newEnd = Math.min(maxEnd, snapToGrid ? snapAbs(drag.origStart + drag.origLength + dxSteps) : drag.origStart + drag.origLength + dxSteps);
         const nl = Math.max(subdivStep, newEnd - drag.origStart);
-        updateStep(drag.stepId, { length: nl });
+        if (drag.group) {
+          // Master clip's snapped end determines the shared length delta; the
+          // other clips in the group get the same delta without re-snapping
+          // (snapping each clip individually would break their relative
+          // lengths). bulkResizeGroup clamps per clip so trailing clips can't
+          // run past TOTAL_STEPS.
+          bulkResizeGroup(drag.group, nl - drag.origLength);
+        } else {
+          updateStep(drag.stepId, { length: nl });
+        }
       }
     };
     const onUp = () => setDrag(null);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.classList.remove('dragging'); };
-  }, [drag, snapToGrid, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
+  }, [drag, snapToGrid, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, bulkResizeGroup, trackOrder, TOTAL_STEPS, STEP_W]);
 
   useEffect(() => {
     if (!paintDrag) return;
@@ -2073,7 +2102,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   }, [setStepW]);
 
   return (
-    <div className="timeline" ref={gridRef} onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
+    <div className={"timeline tool-" + tool} ref={gridRef} onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
       <div className="tl-ruler" onMouseDown={onRulerMouseDown} style={{ width: totalW }}>
         {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => {
           const isBar = i % 4 === 0;
@@ -2219,10 +2248,26 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                             });
                           }}
                           onResizeStart={(e) => {
+                            if (e.button !== 0) return;
                             e.stopPropagation();
+                            // If the grabbed edge belongs to a multi-selection,
+                            // resize all selected clips by the same delta —
+                            // same group-drag idiom as move.
+                            const inGroup = selectedIds.has(s.id) && selectedIds.size > 1;
+                            let group = null;
+                            if (inGroup) {
+                              group = [];
+                              for (const tk in steps) {
+                                for (const c of (steps[tk] || [])) {
+                                  if (selectedIds.has(c.id)) {
+                                    group.push({ id: c.id, origStart: c.start, origLength: c.length });
+                                  }
+                                }
+                              }
+                            }
                             pushHistory && pushHistory();
                             setSelectedStepId(s.id);
-                            setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length });
+                            setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length, group });
                           }}
                         />
                       ));

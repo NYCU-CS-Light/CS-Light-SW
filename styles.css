@@ -489,7 +489,16 @@ input { font-family: inherit; }
 }
 .tl-row-ball { font-family: var(--mono); font-size: 10px; font-weight: 700; }
 .tl-row-led { font-family: var(--mono); font-size: 9px; color: var(--text-faint); letter-spacing: 0.1em; }
-.tl-row-cells { position: relative; cursor: crosshair; height: 100%; }
+.tl-row-cells { position: relative; height: 100%; }
+/* Per-tool cursors on empty grid cells. Each tool gets a distinct shape so
+   the active mode is obvious before clicking. */
+.timeline.tool-paint  .tl-row-cells { cursor: crosshair; }
+.timeline.tool-select .tl-row-cells { cursor: cell; }
+.timeline.tool-erase  .tl-row-cells { cursor: not-allowed; }
+/* When hovering a clip, paint and select stay as grab (move handle);
+   erase becomes the prohibition sign so the user knows the click will
+   destroy the clip. */
+.timeline.tool-erase  .clip { cursor: not-allowed; }
 .tl-subline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); opacity: 0.25; pointer-events: none; }
 .tl-subline.beat { opacity: 0.7; background: var(--border-strong); }
 .tl-subline.bar { opacity: 1; background: var(--border-strong); width: 1px; }
