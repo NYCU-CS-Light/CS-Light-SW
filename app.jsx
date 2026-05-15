@@ -539,6 +539,37 @@ function App() {
   const [restartTick, setRestartTick] = useState(0); // bumped when Restart clip is hit, retriggers audio
   const [tool, setTool] = useState('paint');
 
+  // ---------- Undo / redo ----------
+  // Live ref of project state so history helpers don't re-bind every render.
+  const projectStateRef = useRef({ balls, steps, bpm });
+  useEffect(() => { projectStateRef.current = { balls, steps, bpm }; }, [balls, steps, bpm]);
+  const historyRef = useRef({ past: [], future: [] });
+  const HISTORY_CAP = 100;
+  const pushHistory = useCallback(() => {
+    historyRef.current.past.push({ ...projectStateRef.current });
+    if (historyRef.current.past.length > HISTORY_CAP) historyRef.current.past.shift();
+    historyRef.current.future = [];
+  }, []);
+  const applySnapshot = useCallback((snap) => {
+    setBalls(snap.balls);
+    setSteps(snap.steps);
+    setBpm(snap.bpm);
+    setSelectedStepId(null);
+    setSelectedIds(new Set());
+  }, []);
+  const undo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.past.length === 0) return;
+    h.future.push({ ...projectStateRef.current });
+    applySnapshot(h.past.pop());
+  }, [applySnapshot]);
+  const redo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.future.length === 0) return;
+    h.past.push({ ...projectStateRef.current });
+    applySnapshot(h.future.pop());
+  }, [applySnapshot]);
+
   const palette = t.paletteMode === 'custom'
     ? customPalette
     : (PALETTES[t.paletteMode] || PALETTES.chromatic);
@@ -856,6 +887,7 @@ function App() {
   // Overlap with existing clips is allowed (visually warned downstream).
   const pasteClipboard = useCallback(() => {
     if (!clipboard || !clipboard.clips.length) return;
+    pushHistory();
     setSteps(prev => {
       const out = { ...prev };
       const newIds = [];
@@ -887,6 +919,7 @@ function App() {
   // New project: reset balls/steps/transport. Audio kept (so user can retry against same track).
   const newProject = useCallback(() => {
     if (!confirm('Start a new project? Unsaved changes will be lost.')) return;
+    pushHistory();
     const emptySteps = {};
     initialBalls.forEach((b) => {
       emptySteps[b.id + '-A'] = [];
@@ -930,6 +963,7 @@ function App() {
       try {
         const data = JSON.parse(reader.result);
         if (data.kind !== 'lbproj') throw new Error('Not a LightSeq project file.');
+        pushHistory();
         if (data.balls) setBalls(data.balls);
         if (data.steps) setSteps(data.steps);
         if (typeof data.bpm === 'number') setBpm(data.bpm);
@@ -1150,6 +1184,7 @@ function App() {
 
   const addBall = () => {
     if (balls.length >= 16) return;
+    pushHistory();
     const i = balls.length;
     const id = 'B' + String(i + 1).padStart(2, '0');
     const color = palette[i % palette.length].hex;
@@ -1158,6 +1193,7 @@ function App() {
   };
   const removeBall = (ballId) => {
     if (balls.length <= 1) return;
+    pushHistory();
     setBalls(balls.filter(b => b.id !== ballId));
     setSteps(prev => {
       const out = { ...prev };
@@ -1185,6 +1221,14 @@ function App() {
     const onKey = (e) => {
       if (e.target.tagName === 'INPUT') return;
       const mod = e.ctrlKey || e.metaKey;
+      // Undo / redo — keep above copy/paste so the modifier never falls through.
+      if (mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault(); undo(); return;
+      }
+      if ((mod && e.shiftKey && (e.key === 'z' || e.key === 'Z')) ||
+          (mod && !e.shiftKey && (e.key === 'y' || e.key === 'Y'))) {
+        e.preventDefault(); redo(); return;
+      }
       if (mod && (e.key === 'c' || e.key === 'C')) {
         e.preventDefault();
         copySelected();
@@ -1198,10 +1242,12 @@ function App() {
       if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedIds.size > 0) {
+          pushHistory();
           selectedIds.forEach(id => deleteStepById(id));
           setSelectedIds(new Set());
           setSelectedStepId(null);
         } else if (selectedStepId) {
+          pushHistory();
           deleteStep(selectedStepId);
         }
       }
@@ -1228,7 +1274,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('message', onMsg);
     };
-  }, [selectedStepId, selectedIds, deleteStep, deleteStepById, copySelected, pasteClipboard]);
+  }, [selectedStepId, selectedIds, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory]);
 
   return (
     <div className={"app theme-" + t.theme} data-screen-label="Sequencer">
@@ -1245,6 +1291,7 @@ function App() {
         onNewProject={newProject}
         onExportProject={exportProject}
         onImportProject={importProject}
+        pushHistory={pushHistory}
       />
 
       <CommandBar
@@ -1301,6 +1348,7 @@ function App() {
             stepW={stepW}
             setStepW={setStepW}
             onScroll={setScrollLeft}
+            pushHistory={pushHistory}
           />
         </div>
 
@@ -1359,7 +1407,7 @@ function App() {
             value={Number(cal.diffuser.sigmaPct.toFixed(2))}
             onChange={v => setCal(prev => ({ ...prev, diffuser: { sigmaPct: v } }))} />
           <TweakButton label="Load test pattern"
-            onClick={() => loadCalibrationTestPattern({ setBalls, setSteps, setBpm })} />
+            onClick={() => { pushHistory(); loadCalibrationTestPattern({ setBalls, setSteps, setBpm }); }} />
           <TweakButton label="Export firmware header"
             onClick={() => downloadBlob('calibration.h', 'text/x-c', buildFirmwareHeader(cal))} />
           <TweakButton label="Export JSON"
@@ -1391,7 +1439,7 @@ function App() {
 }
 
 // ============ TOP BAR ============
-function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject }) {
+function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject, pushHistory }) {
   const RESOLUTIONS = ['1/2','1/3','1/4','1/6','1/8','1/12','1/16','1/24','1/32','1/64'];
   const stepsPerBeat = 16 / beatsPerBar;
   const bar = Math.floor(playhead / 16) + 1;
@@ -1434,6 +1482,7 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         <div className="readout">
           <div className="ro-label">BPM</div>
           <input className="ro-input" type="number" value={bpm} min="40" max="240"
+            onFocus={() => pushHistory && pushHistory()}
             onChange={e => setBpm(parseInt(e.target.value)||120)} />
         </div>
         <div className="readout">
@@ -1733,7 +1782,7 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
+function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll, pushHistory }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
@@ -1772,9 +1821,11 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
     const x = e.clientX - rect.left;
     const start = xToSnappedStep(x);
     if (tool === 'paint') {
+      pushHistory && pushHistory();
       onPaint(trackKey, start);
       setPaintDrag(true);
     } else if (tool === 'erase') {
+      pushHistory && pushHistory();
       onErase(trackKey, xToStep(x));
     } else if (tool === 'select') {
       // Marquee coords are stored in .tl-grid content space — convert from
@@ -2032,9 +2083,10 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                           playhead={playhead}
                           tool={tool}
                           onSelect={() => { setSelectedStepId(s.id); setSelectedIds(new Set([s.id])); }}
-                          onErase={() => onErase(trackKey, s.start)}
+                          onErase={() => { pushHistory && pushHistory(); onErase(trackKey, s.start); }}
                           onMoveStart={(e) => {
                             e.stopPropagation();
+                            pushHistory && pushHistory();
                             // If the grabbed clip is part of a multi-selection, drag the whole
                             // group together — also across LEDs/balls. Otherwise become the
                             // sole selection so single-clip drag behaves as before.
@@ -2074,6 +2126,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                           }}
                           onResizeStart={(e) => {
                             e.stopPropagation();
+                            pushHistory && pushHistory();
                             setSelectedStepId(s.id);
                             setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length });
                           }}
