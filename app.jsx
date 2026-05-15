@@ -1860,7 +1860,23 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   const [drag, setDrag] = useState(null);
   const [paintDrag, setPaintDrag] = useState(false);
   const [marquee, setMarquee] = useState(null); // { x0,y0,x1,y1 }
+  // Tracks whether a Ctrl/Cmd modifier is currently held so the cursor can
+  // reflect the temporary-Select behavior in Paint mode. Window blur clears
+  // the state because the keyup may land on a different page.
+  const [modSelect, setModSelect] = useState(false);
   const gridRef = useRef(null);
+  useEffect(() => {
+    const sync = (e) => setModSelect(!!(e.ctrlKey || e.metaKey));
+    const clear = () => setModSelect(false);
+    window.addEventListener('keydown', sync);
+    window.addEventListener('keyup', sync);
+    window.addEventListener('blur', clear);
+    return () => {
+      window.removeEventListener('keydown', sync);
+      window.removeEventListener('keyup', sync);
+      window.removeEventListener('blur', clear);
+    };
+  }, []);
 
   const STEP_W = stepW;
   const totalW = STEP_W * TOTAL_STEPS;
@@ -2102,7 +2118,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   }, [setStepW]);
 
   return (
-    <div className={"timeline tool-" + tool} ref={gridRef} onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
+    <div className={"timeline tool-" + ((tool === 'paint' && modSelect) ? 'select' : tool)} ref={gridRef} onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
       <div className="tl-ruler" onMouseDown={onRulerMouseDown} style={{ width: totalW }}>
         {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => {
           const isBar = i % 4 === 0;
