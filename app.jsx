@@ -2541,16 +2541,16 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
       onMouseDown={onTimelineMouseDown}
       onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
       <div className="tl-ruler" onMouseDown={onRulerMouseDown} style={{ width: totalW }}>
-        {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => {
-          const isBar = i % 4 === 0;
+        {Array.from({ length: TOTAL_BARS * beatsPerBar }).map((_, i) => {
+          const isBar = i % beatsPerBar === 0;
           return (
-            <div key={i} className={"tl-tick " + (isBar?'bar':'beat')} style={{ left: i * STEP_W * 4 }}>
-              {isBar && <span className="tl-tick-label mono">{(i/4)+1}</span>}
+            <div key={i} className={"tl-tick " + (isBar?'bar':'beat')} style={{ left: i * STEP_W * (STEPS_PER_BAR / beatsPerBar) }}>
+              {isBar && <span className="tl-tick-label mono">{(i/beatsPerBar)+1}</span>}
             </div>
           );
         })}
         <div className="tl-playhead-head" style={{ left: playhead * STEP_W }}>
-          <div className="tl-playhead-flag mono">{Math.floor(playhead/16)+1}.{Math.floor((playhead%16)/4)+1}</div>
+          <div className="tl-playhead-flag mono">{Math.floor(playhead/STEPS_PER_BAR)+1}.{Math.floor((playhead%STEPS_PER_BAR)/(STEPS_PER_BAR/beatsPerBar))+1}</div>
         </div>
       </div>
 
