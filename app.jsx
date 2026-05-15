@@ -7,7 +7,6 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "previewLayout": "line",
   "showFade": true,
   "theme": "dark",
-  "paletteMode": "realworld",
   "ballGlow": 0.85,
   "waveStyle": "wave",
   "perfSimEnabled": false,
@@ -19,54 +18,33 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "perfSimTrail": 0.7
 }/*EDITMODE-END*/;
 
-// ============ PALETTES ============
-const PALETTES = {
-  chromatic: [
-    { name: 'Red',     hex: '#ff3b3b' },
-    { name: 'Orange',  hex: '#ff8a00' },
-    { name: 'Amber',   hex: '#ffc933' },
-    { name: 'Green',   hex: '#3ddc84' },
-    { name: 'Cyan',    hex: '#22d3ee' },
-    { name: 'Blue',    hex: '#3b82f6' },
-    { name: 'Violet',  hex: '#a855f7' },
-    { name: 'Magenta', hex: '#ec4899' },
-  ],
-  pastel: [
-    { name: 'Blush',   hex: '#ffb3ba' },
-    { name: 'Peach',   hex: '#ffd9a8' },
-    { name: 'Butter',  hex: '#fff5b3' },
-    { name: 'Mint',    hex: '#b8f2c9' },
-    { name: 'Sky',     hex: '#b5e2ff' },
-    { name: 'Lavender',hex: '#cdb8ff' },
-    { name: 'Rose',    hex: '#ffc0e0' },
-    { name: 'Sand',    hex: '#e8dcc4' },
-  ],
-  mono: [
-    { name: '15%',  hex: '#262626' },
-    { name: '30%',  hex: '#4a4a4a' },
-    { name: '45%',  hex: '#6e6e6e' },
-    { name: '60%',  hex: '#929292' },
-    { name: '75%',  hex: '#b6b6b6' },
-    { name: '85%',  hex: '#cfcfcf' },
-    { name: '95%',  hex: '#e8e8e8' },
-    { name: '100%', hex: '#ffffff' },
-  ],
-  // ROYGBIV + white, tuned for what a real RGB LED actually emits. Each swatch
-  // uses primaries only (no muddying mid-tones), so when the firmware's
-  // calibration LUT scales the channels, the on-device color reads cleanly as
-  // the named hue rather than as a wash of all three channels.
-  realworld: [
-    { name: 'Red',    hex: '#ff0000' },
-    { name: 'Orange', hex: '#ff7000' },
-    { name: 'Yellow', hex: '#ffff00' },
-    { name: 'Green',  hex: '#00ff00' },
-    { name: 'Blue',   hex: '#0000ff' },
-    { name: 'Indigo', hex: '#3000ff' },
-    { name: 'Purple', hex: '#a000ff' },
-    { name: 'White',  hex: '#ffffff' },
-    { name: 'Black',  hex: '#000000' },
-  ],
-};
+// ============ PALETTE SEED ============
+// ROYGBIV + white, tuned for what a real RGB LED actually emits. Each swatch
+// uses primaries only (no muddying mid-tones), so when the firmware's
+// calibration LUT scales the channels, the on-device color reads cleanly as
+// the named hue rather than as a wash of all three channels.
+const PALETTE_SEED = [
+  { name: 'Red',    hex: '#ff0000' },
+  { name: 'Orange', hex: '#ff7000' },
+  { name: 'Yellow', hex: '#ffff00' },
+  { name: 'Green',  hex: '#00ff00' },
+  { name: 'Blue',   hex: '#0000ff' },
+  { name: 'Indigo', hex: '#3000ff' },
+  { name: 'Purple', hex: '#a000ff' },
+  { name: 'White',  hex: '#ffffff' },
+];
+// initialBalls / seedSteps used to seed from PALETTES.chromatic; reuse this
+// neutral set so the initial demo content still has a varied appearance.
+const SEED_STEP_PALETTE = [
+  { name: 'Red',     hex: '#ff3b3b' },
+  { name: 'Orange',  hex: '#ff8a00' },
+  { name: 'Amber',   hex: '#ffc933' },
+  { name: 'Green',   hex: '#3ddc84' },
+  { name: 'Cyan',    hex: '#22d3ee' },
+  { name: 'Blue',    hex: '#3b82f6' },
+  { name: 'Violet',  hex: '#a855f7' },
+  { name: 'Magenta', hex: '#ec4899' },
+];
 
 // ============ COMMANDS ============
 // Each command is a kind of LED behavior placed as a clip.
@@ -156,7 +134,7 @@ function seedSteps() {
     out[b.id + '-B'] = [];
   });
   initialBalls.forEach((b, i) => {
-    const p = PALETTES.chromatic;
+    const p = SEED_STEP_PALETTE;
     out[b.id + '-A'].push({
       id: cryptoId(), start: i * 2, length: 2, command: 'breathe',
       color: p[i % p.length].hex, colorB: p[(i+3) % p.length].hex,
@@ -311,38 +289,67 @@ function loadCalibration() {
   } catch { return CAL_DEFAULTS; }
 }
 
-// ---- Custom palette (user-editable, persisted) ----
-const CUSTOM_PALETTE_LS_KEY = 'lightseq.customPalette.v1';
-const CUSTOM_PALETTE_DEFAULT = PALETTES.chromatic.map(c => ({ ...c }));
+// ---- Palette (user-editable, persisted, arbitrary length) ----
+const PALETTE_LS_KEY = 'lightseq.palette.v2';
+const PALETTE_DEFAULT = PALETTE_SEED.map(c => ({ ...c }));
 
-function loadCustomPalette() {
-  try {
-    const raw = localStorage.getItem(CUSTOM_PALETTE_LS_KEY);
-    if (!raw) return CUSTOM_PALETTE_DEFAULT;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length !== 8) return CUSTOM_PALETTE_DEFAULT;
-    return parsed.map((c, i) => ({
-      name: typeof c?.name === 'string' ? c.name : CUSTOM_PALETTE_DEFAULT[i].name,
-      hex:  /^#[0-9a-fA-F]{6}$/.test(c?.hex) ? c.hex : CUSTOM_PALETTE_DEFAULT[i].hex,
+function sanitizePalette(parsed) {
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const cleaned = parsed
+    .filter(c => c && /^#[0-9a-fA-F]{6}$/.test(c.hex))
+    .map(c => ({
+      name: typeof c.name === 'string' && c.name ? c.name : c.hex,
+      hex: c.hex,
     }));
-  } catch { return CUSTOM_PALETTE_DEFAULT; }
+  return cleaned.length ? cleaned : null;
 }
 
-function useCustomPalette() {
+function loadPalette() {
+  try {
+    const raw = localStorage.getItem(PALETTE_LS_KEY);
+    if (!raw) return PALETTE_DEFAULT;
+    return sanitizePalette(JSON.parse(raw)) || PALETTE_DEFAULT;
+  } catch { return PALETTE_DEFAULT; }
+}
+
+// Single source of truth for the in-app palette. localStorage acts as the
+// per-machine default; .lbproj projects can override transiently via setAll
+// without writing back. Returns mutators that all persist to localStorage,
+// plus a setAll that does not.
+function usePalette() {
   const { useState, useCallback } = React;
-  const [pal, setPalState] = useState(() => loadCustomPalette());
+  const [pal, setPalState] = useState(() => loadPalette());
+  const persist = (next) => {
+    try { localStorage.setItem(PALETTE_LS_KEY, JSON.stringify(next)); } catch {}
+  };
   const setSwatch = useCallback((index, hex) => {
     setPalState(prev => {
-      const next = prev.map((c, i) => i === index ? { ...c, hex } : c);
-      try { localStorage.setItem(CUSTOM_PALETTE_LS_KEY, JSON.stringify(next)); } catch {}
+      const next = prev.map((c, i) => i === index ? { ...c, hex, name: hex } : c);
+      persist(next);
       return next;
     });
   }, []);
-  const resetPalette = useCallback(() => {
-    try { localStorage.removeItem(CUSTOM_PALETTE_LS_KEY); } catch {}
-    setPalState(CUSTOM_PALETTE_DEFAULT);
+  const addSwatch = useCallback((hex) => {
+    setPalState(prev => {
+      const next = [...prev, { name: hex, hex }];
+      persist(next);
+      return next;
+    });
   }, []);
-  return [pal, setSwatch, resetPalette];
+  const removeSwatch = useCallback((index) => {
+    setPalState(prev => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((_, i) => i !== index);
+      persist(next);
+      return next;
+    });
+  }, []);
+  // Used when loading a .lbproj — overrides current palette in memory only.
+  const setAll = useCallback((arr) => {
+    const sanitized = sanitizePalette(arr);
+    if (sanitized) setPalState(sanitized);
+  }, []);
+  return { palette: pal, setSwatch, addSwatch, removeSwatch, setAll };
 }
 
 function useCalibration() {
@@ -524,7 +531,7 @@ function loadCalibrationTestPattern({ setBalls, setSteps, setBpm }) {
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [cal, setCal, resetCal] = useCalibration();
-  const [customPalette, setCustomSwatch, resetCustomPalette] = useCustomPalette();
+  const { palette, setSwatch, addSwatch, removeSwatch, setAll: setPaletteAll } = usePalette();
   const [balls, setBalls] = useState(initialBalls);
   const [steps, setSteps] = useState(seedSteps);
   const [selectedColor, setSelectedColor] = useState(0);
@@ -550,12 +557,14 @@ function App() {
 
   // ---------- Undo / redo ----------
   // Live ref of project state so history helpers don't re-bind every render.
-  const projectStateRef = useRef({ balls, steps, bpm, projectName });
-  useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName }; }, [balls, steps, bpm, projectName]);
+  // audioFile is captured by reference, not cloned — every snapshot pointing at
+  // the same ArrayBuffer is free, and lets clear+undo restore the embed.
+  const projectStateRef = useRef({ balls, steps, bpm, projectName, palette, audio });
+  useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName, palette, audio }; }, [balls, steps, bpm, projectName, palette, audio]);
   const historyRef = useRef({ past: [], future: [] });
   const HISTORY_CAP = 100;
   const pushHistory = useCallback(() => {
-    historyRef.current.past.push({ ...projectStateRef.current });
+    historyRef.current.past.push({ ...projectStateRef.current, audioFile: audioFileRef.current });
     if (historyRef.current.past.length > HISTORY_CAP) historyRef.current.past.shift();
     historyRef.current.future = [];
   }, []);
@@ -564,9 +573,12 @@ function App() {
     setSteps(snap.steps);
     setBpm(snap.bpm);
     if (typeof snap.projectName === 'string') setProjectName(snap.projectName);
+    if (Array.isArray(snap.palette)) setPaletteAll(snap.palette);
+    if (snap.audio !== undefined) setAudio(snap.audio);
+    if (snap.audioFile !== undefined) audioFileRef.current = snap.audioFile;
     setSelectedStepId(null);
     setSelectedIds(new Set());
-  }, []);
+  }, [setPaletteAll]);
   const undo = useCallback(() => {
     const h = historyRef.current;
     if (h.past.length === 0) return;
@@ -580,9 +592,6 @@ function App() {
     applySnapshot(h.future.pop());
   }, [applySnapshot]);
 
-  const palette = t.paletteMode === 'custom'
-    ? customPalette
-    : (PALETTES[t.paletteMode] || PALETTES.chromatic);
   const [stepW, setStepW] = useState(22);
   const [scrollLeft, setScrollLeft] = useState(0);
   const gridSubdiv = { '1/2': 2, '1/3': 3, '1/4': 4, '1/6': 6, '1/8': 8, '1/12': 12, '1/16': 16, '1/24': 24, '1/32': 32, '1/64': 64 }[t.gridRes] || 16;
@@ -592,9 +601,11 @@ function App() {
   // Total bars/steps follow the music track when one is loaded
   const TOTAL_BARS = useMemo(() => {
     if (!audio) return DEFAULT_TOTAL_BARS;
-    // bars = duration_sec * (bpm/60) / 4  (one bar = 4 beats)
-    const bars = (audio.durationSec * bpm / 60) / 4;
-    return Math.max(1, Math.ceil(bars));
+    const stepsPerSec = (bpm / 60) * 4;
+    const playableLen = Math.max(0, audio.durationSec - (audio.trimStartSec ?? 0) - (audio.trimEndSec ?? 0));
+    const endStep = (audio.startStep ?? 0) + playableLen * stepsPerSec;
+    const bars = endStep / STEPS_PER_BAR;
+    return Math.max(DEFAULT_TOTAL_BARS, Math.ceil(bars));
   }, [audio, bpm]);
   const TOTAL_STEPS = TOTAL_BARS * STEPS_PER_BAR;
 
@@ -609,7 +620,7 @@ function App() {
         let np;
         const anchor = audioAnchorRef.current;
         const ctx = audioCtxRef.current;
-        if (anchor && ctx) {
+        if (anchor && ctx && ctx.currentTime >= anchor.ctxTime) {
           // If p was changed externally (scrub) since the last tick, re-anchor to it so
           // the visual respects the new position. Audio doesn't seek — that's the existing
           // behavior — but the playhead now reflects where the user clicked.
@@ -622,6 +633,9 @@ function App() {
           np = anchor.playhead + (ctx.currentTime - anchor.ctxTime) * stepsPerSec;
           anchor.lastP = np;
         } else {
+          // No anchor yet (or audio is still in its silent-wait window before src.start()
+          // fires) — advance the visual playhead by wall-clock dt so transport keeps
+          // moving toward the clip's startStep.
           np = p + dt * stepsPerSec;
         }
         // If the playhead has entered a Restart clip on any track, jump back to 0.
@@ -656,24 +670,30 @@ function App() {
     return () => cancelAnimationFrame(raf);
   }, [playing, bpm, loop, steps, TOTAL_STEPS]);
 
+  // Raw audio file bytes — kept in a ref so they can be embedded into .lbproj
+  // exports without bloating the undo snapshots (which clone `audio` per push).
+  const audioFileRef = useRef(null); // { bytes: ArrayBuffer, mimeType: string }
+
   // ---------- Audio import + playback ----------
-  const importAudio = useCallback(async (file) => {
-    if (!file) return;
+  // Decode an ArrayBuffer of audio bytes into the in-memory audio state.
+  // Used both by the file-picker importer and by project loading (where the
+  // bytes come straight out of the .lbproj ZIP).
+  const loadAudioFromBytes = useCallback(async (bytes, name, mimeType, overrides) => {
     if (!audioCtxRef.current) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       audioCtxRef.current = new Ctx();
     }
     const ctx = audioCtxRef.current;
-    const arr = await file.arrayBuffer();
+    // decodeAudioData detaches the ArrayBuffer; slice so the original copy
+    // we keep in audioFileRef remains usable for re-export.
+    const decodeCopy = bytes.slice(0);
     let buffer;
     try {
-      buffer = await ctx.decodeAudioData(arr);
+      buffer = await ctx.decodeAudioData(decodeCopy);
     } catch (e) {
       alert('Could not decode audio: ' + e.message);
-      return;
+      return false;
     }
-    // Build N peak buckets (max abs over both channels)
-    // Use higher N for long songs so the waveform stays resolved when stretched across many bars.
     const N = Math.min(8192, Math.max(512, Math.round(buffer.duration * 40)));
     const ch0 = buffer.getChannelData(0);
     const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null;
@@ -688,19 +708,40 @@ function App() {
       }
       peaks[i] = max;
     }
-    // Normalize
     const peak = Math.max(0.01, ...peaks);
     for (let i = 0; i < N; i++) peaks[i] /= peak;
 
+    audioFileRef.current = { bytes, mimeType: mimeType || 'audio/mpeg' };
     setAudio({
-      name: file.name,
+      name,
       peaks,
       durationSec: buffer.duration,
       buffer,
+      startStep: 0,
+      trimStartSec: 0,
+      trimEndSec: 0,
+      gain: 1,
+      ...(overrides || {}),
     });
+    return true;
   }, []);
 
-  // Start/stop audio with transport
+  const importAudio = useCallback(async (file) => {
+    if (!file) return;
+    const arr = await file.arrayBuffer();
+    await loadAudioFromBytes(arr, file.name, file.type);
+  }, [loadAudioFromBytes]);
+
+  // Apply a partial patch to the loaded audio (clip moves, trim, volume).
+  // Re-anchors the playback clock so visual/audio don't desync mid-edit.
+  const updateAudio = useCallback((patch) => {
+    setAudio(prev => prev ? { ...prev, ...patch } : prev);
+  }, []);
+
+  // Start/stop audio with transport. Routes the buffer through a GainNode so
+  // the per-clip volume slider can shape playback without re-decoding. Honors
+  // startStep / trimStartSec / trimEndSec so a clip dragged to start at bar 2
+  // waits silently then enters at its trim-in point and stops at trim-out.
   useEffect(() => {
     if (!audio || !audioCtxRef.current) return;
     const ctx = audioCtxRef.current;
@@ -714,23 +755,54 @@ function App() {
     if (!playing) return;
     if (ctx.state === 'suspended') ctx.resume();
 
-    // map current playhead (steps) -> seconds in song
     const stepsPerSec = (bpm / 60) * 4;
-    const offsetSec = playhead / stepsPerSec;
+    const startStep = audio.startStep ?? 0;
+    const trimStart = audio.trimStartSec ?? 0;
+    const trimEnd = audio.trimEndSec ?? 0;
+    const playableLen = Math.max(0, audio.durationSec - trimStart - trimEnd);
+    const audioEndStep = startStep + playableLen * stepsPerSec;
+
+    // Don't schedule if playhead is already past the clip's end window.
+    if (playhead >= audioEndStep) return;
+
     const src = ctx.createBufferSource();
     src.buffer = audio.buffer;
-    src.connect(ctx.destination);
-    const startAt = Math.min(audio.buffer.duration - 0.01, Math.max(0, offsetSec));
-    // Schedule a hair into the future so the anchor's ctxTime matches actual playback start.
-    const when = ctx.currentTime + 0.05;
-    src.start(when, startAt);
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = audio.gain ?? 1;
+    src.connect(gainNode).connect(ctx.destination);
+
+    // when = clock time we schedule playback to start
+    // bufferOffset = position inside the decoded buffer to start at
+    // remaining = audible duration scheduled (so we stop at trimEnd)
+    let when, bufferOffset, remaining;
+    if (playhead < startStep) {
+      // Wait silently then enter at the trim-in point.
+      when = ctx.currentTime + (startStep - playhead) / stepsPerSec + 0.05;
+      bufferOffset = trimStart;
+      remaining = playableLen;
+    } else {
+      // Already past the clip's start — enter mid-buffer.
+      const into = (playhead - startStep) / stepsPerSec;
+      when = ctx.currentTime + 0.05;
+      bufferOffset = trimStart + into;
+      remaining = Math.max(0, playableLen - into);
+    }
+    try {
+      src.start(when, bufferOffset);
+      if (remaining > 0) src.stop(when + remaining);
+    } catch {
+      // Fall back to playing without a precise end if the runtime objects.
+      try { src.start(when, bufferOffset); } catch {}
+    }
     audioSourceRef.current = src;
+    audioSourceRef.current._gain = gainNode;
     audioAnchorRef.current = { ctxTime: when, playhead };
 
     return () => {
       if (audioSourceRef.current) {
         try { audioSourceRef.current.stop(); } catch {}
         audioSourceRef.current.disconnect();
+        try { audioSourceRef.current._gain?.disconnect(); } catch {}
         audioSourceRef.current = null;
       }
       audioAnchorRef.current = null;
@@ -958,6 +1030,8 @@ function App() {
     setSteps(emptySteps);
     setBpm(120);
     setProjectName('Untitled');
+    setAudio(null);
+    audioFileRef.current = null;
     setPlayhead(0);
     setPlaying(false);
     setSelectedStepId(null);
@@ -965,64 +1039,121 @@ function App() {
     setClipboard(null);
   }, []);
 
-  // Serialize project to a .lbproj (JSON) file. Audio is referenced by name only — not embedded.
-  const exportProject = useCallback(() => {
-    const payload = {
+  // Serialize project to a .lbproj. v4 is a ZIP container holding project.json
+  // plus the original audio file bytes so reopening restores music without a
+  // manual re-import. Falls back to writing legacy JSON (no ZIP wrapper) when
+  // there's no audio loaded — keeps the file readable by humans / older code.
+  const exportProject = useCallback(async () => {
+    const audioFile = audioFileRef.current;
+    const audioFilename = audio && audioFile
+      ? 'audio/' + sanitizeFilename(audio.name)
+      : null;
+    const manifest = {
       kind: 'lbproj',
-      version: 2,
+      version: audioFile ? 4 : 3,
       name: projectName,
       bpm,
       balls,
       steps,
-      audio: audio ? { name: audio.name, durationSec: audio.durationSec } : null,
+      palette,
+      audio: audio ? {
+        name: audio.name,
+        durationSec: audio.durationSec,
+        startStep: audio.startStep ?? 0,
+        trimStartSec: audio.trimStartSec ?? 0,
+        trimEndSec: audio.trimEndSec ?? 0,
+        gain: audio.gain ?? 1,
+        file: audioFilename,
+        mimeType: audioFile ? audioFile.mimeType : undefined,
+      } : null,
       tweaks: t,
       savedAt: new Date().toISOString(),
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    let blob;
+    if (audioFile) {
+      const zip = new JSZip();
+      zip.file('project.json', JSON.stringify(manifest, null, 2));
+      zip.file(audioFilename, audioFile.bytes);
+      blob = await zip.generateAsync({ type: 'blob' });
+    } else {
+      blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = sanitizeFilename(projectName) + '.lbproj';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [projectName, bpm, balls, steps, audio, t]);
+  }, [projectName, bpm, balls, steps, audio, t, palette]);
 
-  // Import a .lbproj. Restores balls/steps/bpm/tweaks; audio must be re-imported separately.
-  const importProject = useCallback((file) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result);
-        if (data.kind !== 'lbproj') throw new Error('Not a LightSeq project file.');
-        pushHistory();
-        if (data.balls) setBalls(data.balls);
-        if (data.steps) setSteps(data.steps);
-        if (typeof data.bpm === 'number') setBpm(data.bpm);
-        // v2 stores name. v1 has no name field — fall back to the file name
-        // (minus the extension) so reopened older projects still get something
-        // sensible in the title bar.
-        if (typeof data.name === 'string' && data.name) {
-          setProjectName(data.name);
-        } else if (file && file.name) {
-          setProjectName(file.name.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
-        }
-        if (data.tweaks) {
-          for (const k in data.tweaks) setTweak(k, data.tweaks[k]);
-        }
-        setPlayhead(0);
-        setPlaying(false);
-        setSelectedStepId(null);
-        setSelectedIds(new Set());
-        if (data.audio && data.audio.name) {
-          // Just notify — we don't re-attach the audio file because we never embedded it.
-          setTimeout(() => alert('Project loaded.\n\nThis project referenced an audio track (' + data.audio.name + '). Re-import it from the MUSIC panel to sync.'), 0);
-        }
-      } catch (err) {
-        alert('Could not load project: ' + err.message);
+  // Apply a parsed manifest to app state. Split out from importProject so the
+  // ZIP and legacy-JSON paths share one implementation.
+  const applyManifest = useCallback((data, fileName) => {
+    if (data.kind !== 'lbproj') throw new Error('Not a LightSeq project file.');
+    pushHistory();
+    if (data.balls) setBalls(data.balls);
+    if (data.steps) setSteps(data.steps);
+    if (typeof data.bpm === 'number') setBpm(data.bpm);
+    // v2+ stores name. v1 has no name field — fall back to the file name.
+    if (typeof data.name === 'string' && data.name) {
+      setProjectName(data.name);
+    } else if (fileName) {
+      setProjectName(fileName.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
+    }
+    if (data.tweaks) {
+      for (const k in data.tweaks) {
+        if (k === 'paletteMode') continue; // removed v2 tweak
+        setTweak(k, data.tweaks[k]);
       }
-    };
-    reader.readAsText(file);
-  }, [setTweak]);
+    }
+    if (Array.isArray(data.palette)) setPaletteAll(data.palette);
+    setPlayhead(0);
+    setPlaying(false);
+    setSelectedStepId(null);
+    setSelectedIds(new Set());
+  }, [pushHistory, setTweak, setPaletteAll]);
+
+  // Import a .lbproj. v4 is a ZIP with embedded audio; v1–v3 are bare JSON.
+  // Detect by peeking the first 4 bytes for the ZIP magic (PK\x03\x04).
+  const importProject = useCallback(async (file) => {
+    try {
+      const ab = await file.arrayBuffer();
+      const head = new Uint8Array(ab, 0, Math.min(4, ab.byteLength));
+      const isZip = head.length >= 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
+      if (isZip) {
+        const zip = await JSZip.loadAsync(ab);
+        const manifestEntry = zip.file('project.json');
+        if (!manifestEntry) throw new Error('Project archive missing project.json.');
+        const data = JSON.parse(await manifestEntry.async('string'));
+        applyManifest(data, file.name);
+        if (data.audio && data.audio.file) {
+          const audioEntry = zip.file(data.audio.file);
+          if (audioEntry) {
+            const bytes = await audioEntry.async('arraybuffer');
+            await loadAudioFromBytes(bytes, data.audio.name || 'audio', data.audio.mimeType, {
+              startStep: data.audio.startStep ?? 0,
+              trimStartSec: data.audio.trimStartSec ?? 0,
+              trimEndSec: data.audio.trimEndSec ?? 0,
+              gain: data.audio.gain ?? 1,
+            });
+          }
+        } else {
+          // Manifest without an embedded audio file — leave any existing track in place
+          // and clear if the manifest explicitly carries no audio.
+          if (!data.audio) { setAudio(null); audioFileRef.current = null; }
+        }
+      } else {
+        const text = new TextDecoder().decode(ab);
+        const data = JSON.parse(text);
+        applyManifest(data, file.name);
+        if (data.audio && data.audio.name) {
+          setTimeout(() => alert('Project loaded.\n\nThis project referenced an audio track (' + data.audio.name + ') but did not embed it. Re-import it from the MUSIC panel to sync.'), 0);
+        }
+      }
+    } catch (err) {
+      alert('Could not load project: ' + err.message);
+    }
+  }, [applyManifest, loadAudioFromBytes]);
 
   const exportTxt = useCallback(() => {
     // Refuse to export if any track has overlapping clips. The firmware plays
@@ -1305,7 +1436,10 @@ function App() {
           deleteStep(selectedStepId);
         }
       }
-      if (!mod && e.key >= '1' && e.key <= '8') setSelectedColor(parseInt(e.key) - 1);
+      if (!mod && e.key >= '1' && e.key <= '8') {
+        const idx = parseInt(e.key) - 1;
+        if (idx < palette.length) setSelectedColor(idx);
+      }
       if (!mod && e.key === 'p') setTool('paint');
       if (!mod && e.key === 'e') setTool('erase');
       if (!mod && e.key === 's') setTool('select');
@@ -1328,7 +1462,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('message', onMsg);
     };
-  }, [selectedStepId, selectedIds, steps, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory]);
+  }, [selectedStepId, selectedIds, steps, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory, palette.length]);
 
   return (
     <div className={"app theme-" + t.theme} data-screen-label="Sequencer">
@@ -1357,6 +1491,19 @@ function App() {
         palette={palette}
         selectedColor={selectedColor}
         setSelectedColor={setSelectedColor}
+        pushHistory={pushHistory}
+        setSwatch={setSwatch}
+        addSwatch={addSwatch}
+        onSwatchRemove={(i) => {
+          if (palette.length <= 1) return;
+          pushHistory();
+          removeSwatch(i);
+          setSelectedColor(prev => {
+            if (prev === i) return Math.max(0, i - 1);
+            if (prev > i) return prev - 1;
+            return prev;
+          });
+        }}
       />
 
       <div className="main">
@@ -1372,12 +1519,17 @@ function App() {
             style={t.waveStyle}
             audio={audio}
             onImport={importAudio}
-            onClear={() => setAudio(null)}
+            onClear={() => { setAudio(null); audioFileRef.current = null; }}
             totalBars={TOTAL_BARS}
             totalSteps={TOTAL_STEPS}
             stepW={stepW}
             setStepW={setStepW}
             scrollLeft={scrollLeft}
+            snapToGrid={snapToGrid}
+            gridSubdiv={gridSubdiv}
+            beatsPerBar={beatsPerBar}
+            updateAudio={updateAudio}
+            pushHistory={pushHistory}
           />
           <Timeline
             balls={balls}
@@ -1474,18 +1626,6 @@ function App() {
           <TweakButton label="Reset to defaults" onClick={resetCal} secondary />
         </TweakSection>
         <TweakSection title="Style">
-          <TweakRadio label="Palette" value={t.paletteMode}
-            options={[{value:'chromatic',label:'Chroma'},{value:'pastel',label:'Pastel'},{value:'mono',label:'Mono'},{value:'realworld',label:'Real'},{value:'custom',label:'Custom'}]}
-            onChange={v => setTweak('paletteMode', v)} />
-          {t.paletteMode === 'custom' && (
-            <>
-              {customPalette.map((c, i) => (
-                <TweakColor key={i} label={`Swatch ${i + 1}`} value={c.hex}
-                  onChange={(hex) => setCustomSwatch(i, hex)} />
-              ))}
-              <TweakButton label="Reset palette" onClick={resetCustomPalette} secondary />
-            </>
-          )}
           <TweakRadio label="Theme" value={t.theme}
             options={[{value:'dark',label:'Dark'},{value:'light',label:'Light'}]}
             onChange={v => setTweak('theme', v)} />
@@ -1643,7 +1783,71 @@ function formatTime(stepPos, bpm) {
 }
 
 // ============ COMMAND BAR ============
-function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor }) {
+function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor, pushHistory, setSwatch, addSwatch, onSwatchRemove }) {
+  // Edit popover (right-click on a swatch).
+  const [popover, setPopover] = useState(null); // { index, x, y, draftHex, baseHex }
+  // Add popover (+ button). Picking a color here only updates the draft —
+  // creating the swatch requires clicking the explicit Create button.
+  const [addPopover, setAddPopover] = useState(null); // { x, y, draftHex }
+  const popoverRef = useRef(null);
+  const addPopoverRef = useRef(null);
+  const addBtnRef = useRef(null);
+
+  useEffect(() => {
+    if (!popover && !addPopover) return;
+    const onDoc = (e) => {
+      if (popover && popoverRef.current && !popoverRef.current.contains(e.target)) {
+        setPopover(null);
+      }
+      if (addPopover && addPopoverRef.current && !addPopoverRef.current.contains(e.target)) {
+        // Click outside discards the draft — the user must press Create to commit.
+        setAddPopover(null);
+      }
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { setPopover(null); setAddPopover(null); }
+    };
+    document.addEventListener('mousedown', onDoc);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [popover, addPopover]);
+
+  const openAddPopover = () => {
+    if (!addBtnRef.current) return;
+    const rect = addBtnRef.current.getBoundingClientRect();
+    setAddPopover({ x: rect.left, y: rect.bottom + 4, draftHex: '#ffffff' });
+  };
+
+  const openEditPopover = (i, btn) => {
+    const rect = btn.getBoundingClientRect();
+    // Snapshot the current color so Cancel can restore it — live-preview happens
+    // in the swatch as the user picks, but discarding closes without a commit.
+    pushHistory && pushHistory();
+    setPopover({ index: i, x: rect.left, y: rect.bottom + 4, baseHex: palette[i]?.hex || '#000000', draftHex: palette[i]?.hex || '#000000' });
+  };
+
+  const commitAdd = () => {
+    if (!addPopover) return;
+    pushHistory && pushHistory();
+    addSwatch(addPopover.draftHex);
+    setAddPopover(null);
+  };
+
+  const cancelEdit = () => {
+    // Restore the original color the swatch had when the popover opened.
+    if (popover && popover.baseHex && palette[popover.index]?.hex !== popover.baseHex) {
+      setSwatch(popover.index, popover.baseHex);
+    }
+    setPopover(null);
+    // The pushHistory at open is a no-op rollback for the user via Ctrl+Z if they
+    // change their mind later; here we just don't apply any further mutation.
+  };
+
+  const commitEdit = () => { setPopover(null); };
+
   return (
     <div className="cmdbar">
       <div className="cmdbar-section">
@@ -1669,23 +1873,88 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
               className={"swatch " + (selectedColor===i?'on':'')}
               style={{ background: c.hex, boxShadow: selectedColor===i ? '0 0 0 2px var(--bg), 0 0 0 4px '+c.hex+', 0 0 14px '+c.hex : 'none' }}
               onClick={() => setSelectedColor(i)}
-              title={c.name + ' · ' + (i+1)} />
+              onContextMenu={(e) => {
+                e.preventDefault();
+                openEditPopover(i, e.currentTarget);
+              }}
+              title={c.name + (i < 8 ? ' · ' + (i+1) : '') + ' (right-click to edit)'} />
           ))}
+          <button
+            ref={addBtnRef}
+            className="swatch swatch-add"
+            onClick={openAddPopover}
+            title="Add swatch">+</button>
         </div>
       </div>
       <div className="cmdbar-hint mono">Pick a command + color, then click-drag on the grid to place.</div>
+      {popover && (
+        <div ref={popoverRef} className="swatch-popover"
+          style={{ left: popover.x, top: popover.y }}
+          onMouseDown={(e) => e.stopPropagation()}>
+          <label className="swatch-popover-row">
+            <span className="mono">Color</span>
+            <input
+              type="color"
+              value={palette[popover.index]?.hex || '#000000'}
+              onChange={(e) => {
+                // Live preview — committed only when the user clicks Save. Cancel
+                // restores baseHex captured at open.
+                setSwatch(popover.index, e.target.value);
+                setPopover(p => p ? { ...p, draftHex: e.target.value } : p);
+              }} />
+          </label>
+          <div className="swatch-popover-actions">
+            <button
+              className="swatch-popover-remove"
+              disabled={palette.length <= 1}
+              onClick={() => { onSwatchRemove && onSwatchRemove(popover.index); setPopover(null); }}>
+              Remove
+            </button>
+            <div className="swatch-popover-spacer" />
+            <button className="swatch-popover-btn secondary" onClick={cancelEdit}>Cancel</button>
+            <button className="swatch-popover-btn primary" onClick={commitEdit}>Save</button>
+          </div>
+        </div>
+      )}
+      {addPopover && (
+        <div ref={addPopoverRef} className="swatch-popover"
+          style={{ left: addPopover.x, top: addPopover.y }}
+          onMouseDown={(e) => e.stopPropagation()}>
+          <label className="swatch-popover-row">
+            <span className="mono">New color</span>
+            <input
+              type="color"
+              value={addPopover.draftHex}
+              onChange={(e) => setAddPopover(p => p ? { ...p, draftHex: e.target.value } : p)} />
+          </label>
+          <div className="swatch-popover-preview" style={{ background: addPopover.draftHex }} />
+          <div className="swatch-popover-actions">
+            <button className="swatch-popover-btn secondary" onClick={() => setAddPopover(null)}>Cancel</button>
+            <button className="swatch-popover-btn primary" onClick={commitAdd}>Create</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ============ WAVEFORM TRACK ============
-function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onClear, totalBars, totalSteps, stepW, setStepW, scrollLeft }) {
+function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onClear, totalBars, totalSteps, stepW, setStepW, scrollLeft, snapToGrid, gridSubdiv, beatsPerBar = 4, updateAudio, pushHistory }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const fileRef = useRef(null);
+  // Drag state lives in a ref so the window listeners can read the latest
+  // origin/mode without re-binding on every move event.
+  const dragRef = useRef(null);
+  const [, setDragTick] = useState(0);
+
+  const STEP_W = stepW;
+  const totalW = STEP_W * TOTAL_STEPS;
+  const stepsPerSec = (bpm / 60) * 4;
+
   // Use imported peaks if present, otherwise a deterministic fake
-  const wave = useMemo(() => {
-    if (audio && audio.peaks) return audio.peaks;
+  const fakeWave = useMemo(() => {
+    if (audio && audio.peaks) return null;
     const N = 256;
     const out = [];
     for (let i = 0; i < N; i++) {
@@ -1700,30 +1969,85 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
     return out;
   }, [audio]);
 
-  const STEP_W = stepW;
-  const totalW = STEP_W * TOTAL_STEPS;
-  // Audio occupies only its real duration in steps; the rest of the timeline is silence.
-  const audioSteps = audio
-    ? (audio.durationSec * bpm / 60) * (STEPS_PER_BAR / 4)  // sec * beats/sec * steps/beat
-    : TOTAL_STEPS;
-  const audioW = Math.min(totalW, STEP_W * audioSteps);
+  // Audio clip geometry derived from current trim/startStep. Peaks are sliced
+  // to the audible window so the displayed waveform always matches what plays.
+  const startStep = audio ? (audio.startStep ?? 0) : 0;
+  const trimStart = audio ? (audio.trimStartSec ?? 0) : 0;
+  const trimEnd = audio ? (audio.trimEndSec ?? 0) : 0;
+  const audibleSec = audio ? Math.max(0, audio.durationSec - trimStart - trimEnd) : 0;
+  const audioW = audio ? audibleSec * stepsPerSec * STEP_W : totalW;
+  const audioLeft = audio ? startStep * STEP_W : 0;
+  const displayPeaks = useMemo(() => {
+    if (!audio || !audio.peaks) return fakeWave || [];
+    const peaks = audio.peaks;
+    const lo = Math.max(0, Math.min(1, trimStart / audio.durationSec));
+    const hi = Math.max(0, Math.min(1, 1 - trimEnd / audio.durationSec));
+    if (hi <= lo) return [];
+    const a = Math.floor(lo * peaks.length);
+    const b = Math.max(a + 1, Math.ceil(hi * peaks.length));
+    return peaks.slice(a, b);
+  }, [audio, trimStart, trimEnd, fakeWave]);
 
-  const onScrub = (e) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const setFromX = (clientX) => {
-      const x = clientX - rect.left;
-      setPlayhead(Math.max(0, Math.min(TOTAL_STEPS, x / STEP_W)));
+  const snapStep = (step) => {
+    if (!snapToGrid) return step;
+    const sub = STEPS_PER_BAR / gridSubdiv;
+    return Math.round(step / sub) * sub;
+  };
+
+  const beginDrag = (e, mode) => {
+    if (!audio) return;
+    e.stopPropagation();
+    e.preventDefault();
+    pushHistory && pushHistory();
+    dragRef.current = {
+      mode,
+      startX: e.clientX,
+      origStartStep: startStep,
+      origTrimStart: trimStart,
+      origTrimEnd: trimEnd,
+      origDuration: audio.durationSec,
     };
-    setFromX(e.clientX);
     document.body.classList.add('dragging');
-    const onMove = (ev) => setFromX(ev.clientX);
+    const onMove = (ev) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const dxSteps = (ev.clientX - d.startX) / STEP_W;
+      if (d.mode === 'audio-move') {
+        const next = Math.max(0, snapStep(d.origStartStep + dxSteps));
+        updateAudio({ startStep: next });
+      } else if (d.mode === 'audio-trim-start') {
+        // Dragging the left edge: right end stays anchored, so trimStart and
+        // startStep increase in lockstep by the same step delta.
+        const wantStartStep = snapStep(d.origStartStep + dxSteps);
+        const deltaSteps = wantStartStep - d.origStartStep;
+        const deltaSec = deltaSteps / stepsPerSec;
+        const maxTrimStart = d.origDuration - d.origTrimEnd - 0.05;
+        const newTrimStart = Math.max(0, Math.min(maxTrimStart, d.origTrimStart + deltaSec));
+        const appliedDeltaSec = newTrimStart - d.origTrimStart;
+        const appliedDeltaSteps = appliedDeltaSec * stepsPerSec;
+        const newStartStep = Math.max(0, d.origStartStep + appliedDeltaSteps);
+        updateAudio({ startStep: newStartStep, trimStartSec: newTrimStart });
+      } else if (d.mode === 'audio-trim-end') {
+        // Right edge moves; trimEnd grows when dragging left.
+        const dxSec = -dxSteps / stepsPerSec;
+        const maxTrimEnd = d.origDuration - d.origTrimStart - 0.05;
+        const newTrimEnd = Math.max(0, Math.min(maxTrimEnd, d.origTrimEnd + dxSec));
+        updateAudio({ trimEndSec: newTrimEnd });
+      }
+      setDragTick(t => t + 1);
+    };
     const onUp = () => {
+      dragRef.current = null;
+      document.body.classList.remove('dragging');
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
-      document.body.classList.remove('dragging');
     };
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
+  };
+
+  const onVolume = (e) => {
+    updateAudio({ gain: parseFloat(e.target.value) });
   };
 
   return (
@@ -1751,25 +2075,41 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
             }}
           />
         </div>
+        {audio && (
+          <div className="wave-volume mono" title="Volume">
+            <span>VOL</span>
+            <input
+              type="range"
+              min="0" max="1.5" step="0.01"
+              value={audio.gain ?? 1}
+              onFocus={() => pushHistory && pushHistory()}
+              onChange={onVolume}
+            />
+          </div>
+        )}
       </div>
       <div className="wave-viewport">
         <div className="wave-rail" style={{ width: totalW, transform: `translateX(${-scrollLeft}px)` }}>
-          <div className="wave-canvas" onMouseDown={onScrub} style={{ width: totalW }}>
-          {/* Waveform content layer — sized to actual audio duration so peaks align with beats. */}
-          <div className="wave-content" style={{ width: audioW, position: 'absolute', left: 0, top: 0, bottom: 0 }}>
+          <div className="wave-canvas" style={{ width: totalW }}>
+          {/* Audio clip — positioned by startStep, sized by audible (trimmed) length.
+              Body is draggable to move; left/right edges are trim handles. */}
+          <div
+            className="wave-clip"
+            style={{ position: 'absolute', left: audioLeft, top: 0, bottom: 0, width: Math.max(8, audioW), cursor: audio ? 'grab' : 'default' }}
+            onMouseDown={(e) => audio && beginDrag(e, 'audio-move')}>
           {style === 'bars' && (
             <div className="wave-bars">
-              {wave.map((v, i) => (
+              {displayPeaks.map((v, i) => (
                 <div key={i} className="wave-bar" style={{ height: (v*100).toFixed(0)+'%' }}/>
               ))}
             </div>
           )}
-          {style === 'wave' && (
-            <svg className="wave-svg" viewBox={`0 0 ${wave.length} 100`} preserveAspectRatio="none">
+          {style === 'wave' && displayPeaks.length > 1 && (
+            <svg className="wave-svg" viewBox={`0 0 ${displayPeaks.length} 100`} preserveAspectRatio="none">
               <path
-                d={"M 0 50 " + wave.map((v,i) => `L ${i} ${50 - v*45}`).join(' ') +
-                   " L " + wave.length + " 50 " +
-                   wave.map((v,i) => `L ${wave.length-i-1} ${50 + wave[wave.length-i-1]*45}`).join(' ') + " Z"}
+                d={"M 0 50 " + displayPeaks.map((v,i) => `L ${i} ${50 - v*45}`).join(' ') +
+                   " L " + displayPeaks.length + " 50 " +
+                   displayPeaks.map((v,i) => `L ${displayPeaks.length-i-1} ${50 + displayPeaks[displayPeaks.length-i-1]*45}`).join(' ') + " Z"}
                 fill="url(#wgrad)"/>
               <defs>
                 <linearGradient id="wgrad" x1="0" y1="0" x2="0" y2="1">
@@ -1781,7 +2121,7 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
           )}
           {style === 'spec' && (
             <div className="wave-spec">
-              {wave.map((v, i) => (
+              {displayPeaks.map((v, i) => (
                 <div key={i} className="wave-spec-col" style={{
                   background: `linear-gradient(180deg,
                     hsl(${280 - v*200} 90% 60%) 0%,
@@ -1791,13 +2131,23 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
               ))}
             </div>
           )}
+          {audio && (
+            <>
+              <div className="wave-trim-handle wave-trim-start"
+                onMouseDown={(e) => beginDrag(e, 'audio-trim-start')} title="Trim start"/>
+              <div className="wave-trim-handle wave-trim-end"
+                onMouseDown={(e) => beginDrag(e, 'audio-trim-end')} title="Trim end"/>
+            </>
+          )}
           </div>
-          {/* beat ticks */}
+          {/* Beat ticks — beatsPerBar follows the grid resolution so triplet
+              resolutions (1/3, 1/6, 1/12, 1/24) draw 3 beats per bar. The
+              step-width of one beat is STEPS_PER_BAR / beatsPerBar. */}
           <div className="wave-ticks">
-            {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => (
-              <div key={i} className={"wave-tick " + (i%4===0?'bar':'')}
-                style={{ left: i * STEP_W * 4 }}>
-                {i%4===0 && <span className="wave-tick-num mono">{(i/4)+1}</span>}
+            {Array.from({ length: TOTAL_BARS * beatsPerBar }).map((_, i) => (
+              <div key={i} className={"wave-tick " + (i%beatsPerBar===0?'bar':'')}
+                style={{ left: i * STEP_W * (STEPS_PER_BAR / beatsPerBar) }}>
+                {i%beatsPerBar===0 && <span className="wave-tick-num mono">{(i/beatsPerBar)+1}</span>}
               </div>
             ))}
           </div>
@@ -2191,16 +2541,16 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
       onMouseDown={onTimelineMouseDown}
       onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
       <div className="tl-ruler" onMouseDown={onRulerMouseDown} style={{ width: totalW }}>
-        {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => {
-          const isBar = i % 4 === 0;
+        {Array.from({ length: TOTAL_BARS * beatsPerBar }).map((_, i) => {
+          const isBar = i % beatsPerBar === 0;
           return (
-            <div key={i} className={"tl-tick " + (isBar?'bar':'beat')} style={{ left: i * STEP_W * 4 }}>
-              {isBar && <span className="tl-tick-label mono">{(i/4)+1}</span>}
+            <div key={i} className={"tl-tick " + (isBar?'bar':'beat')} style={{ left: i * STEP_W * (STEPS_PER_BAR / beatsPerBar) }}>
+              {isBar && <span className="tl-tick-label mono">{(i/beatsPerBar)+1}</span>}
             </div>
           );
         })}
         <div className="tl-playhead-head" style={{ left: playhead * STEP_W }}>
-          <div className="tl-playhead-flag mono">{Math.floor(playhead/16)+1}.{Math.floor((playhead%16)/4)+1}</div>
+          <div className="tl-playhead-flag mono">{Math.floor(playhead/STEPS_PER_BAR)+1}.{Math.floor((playhead%STEPS_PER_BAR)/(STEPS_PER_BAR/beatsPerBar))+1}</div>
         </div>
       </div>
 
