@@ -2140,12 +2140,17 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                             // Ctrl/Cmd-click → toggle this clip in/out of the
                             // multi-selection; plain click → single-select.
                             if (ev && (ev.ctrlKey || ev.metaKey)) {
+                              const had = selectedIds.has(s.id);
                               setSelectedIds(prev => {
                                 const next = new Set(prev);
-                                if (next.has(s.id)) next.delete(s.id); else next.add(s.id);
+                                if (had) next.delete(s.id); else next.add(s.id);
                                 return next;
                               });
-                              setSelectedStepId(s.id);
+                              // `selected` checks selectedStepId OR selectedIds, so
+                              // leaving selectedStepId pinned to s.id after a
+                              // deselect keeps the clip looking selected. Clear
+                              // it on deselect; point it at s.id on select.
+                              setSelectedStepId(prev => had ? (prev === s.id ? null : prev) : s.id);
                             } else {
                               setSelectedStepId(s.id);
                               setSelectedIds(new Set([s.id]));
