@@ -45,6 +45,15 @@ body.dragging * {
   -webkit-user-select: none !important;
   cursor: inherit;
 }
+/* While the user is holding the right mouse button to brush-erase clips
+   in Paint mode, force the delete cursor everywhere so it stays visible
+   over clips, the ruler, label gutter, and any other inner element. */
+body.right-deleting,
+body.right-deleting * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: not-allowed !important;
+}
 .timeline, .clip, .tl-row-cells, .wave-canvas, .tl-ruler {
   user-select: none;
   -webkit-user-select: none;
@@ -99,6 +108,24 @@ input { font-family: inherit; }
 .brand-mark span:nth-child(3) { background: oklch(0.74 0.16 320); box-shadow: 0 0 8px oklch(0.74 0.16 320); }
 .brand-title { font-size: 13px; font-weight: 700; letter-spacing: 0.18em; }
 .brand-sub { font-size: 9px; color: var(--text-faint); letter-spacing: 0.14em; text-transform: uppercase; font-family: var(--mono); }
+/* Inline-editable project name in the top bar. Borderless until focused
+   so it reads as a label, not a form field. */
+.project-name {
+  width: 200px;
+  background: transparent;
+  border: none;
+  outline: none;
+  padding: 2px 4px;
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.15s, color 0.15s;
+}
+.project-name:hover { color: var(--text); border-bottom-color: rgba(255,255,255,0.15); }
+.project-name:focus { color: var(--text); border-bottom-color: rgba(255,255,255,0.4); }
 
 .transport { display: flex; gap: 4px; }
 .tbtn {
@@ -471,7 +498,16 @@ input { font-family: inherit; }
 }
 .tl-row-ball { font-family: var(--mono); font-size: 10px; font-weight: 700; }
 .tl-row-led { font-family: var(--mono); font-size: 9px; color: var(--text-faint); letter-spacing: 0.1em; }
-.tl-row-cells { position: relative; cursor: crosshair; height: 100%; }
+.tl-row-cells { position: relative; height: 100%; }
+/* Per-tool cursors on empty grid cells. Each tool gets a distinct shape so
+   the active mode is obvious before clicking. */
+.timeline.tool-paint  .tl-row-cells { cursor: crosshair; }
+.timeline.tool-select .tl-row-cells { cursor: cell; }
+.timeline.tool-erase  .tl-row-cells { cursor: not-allowed; }
+/* When hovering a clip, paint and select stay as grab (move handle);
+   erase becomes the prohibition sign so the user knows the click will
+   destroy the clip. */
+.timeline.tool-erase  .clip { cursor: not-allowed; }
 .tl-subline { position: absolute; top: 0; bottom: 0; width: 1px; background: var(--border); opacity: 0.25; pointer-events: none; }
 .tl-subline.beat { opacity: 0.7; background: var(--border-strong); }
 .tl-subline.bar { opacity: 1; background: var(--border-strong); width: 1px; }

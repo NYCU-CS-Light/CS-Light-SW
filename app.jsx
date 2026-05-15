@@ -141,6 +141,14 @@ function cryptoId() {
   return 's' + Math.random().toString(36).slice(2, 10);
 }
 
+// Strip characters that Windows / macOS / Linux refuse in filenames so
+// projectName-derived downloads always succeed. Empty input falls back to
+// 'Untitled' rather than producing a "" filename.
+function sanitizeFilename(s) {
+  const cleaned = (s || '').replace(/[\\/:*?"<>|]/g, '_').trim();
+  return cleaned || 'Untitled';
+}
+
 function seedSteps() {
   const out = {};
   initialBalls.forEach((b) => {
@@ -538,6 +546,39 @@ function App() {
   const audioAnchorRef = useRef(null);
   const [restartTick, setRestartTick] = useState(0); // bumped when Restart clip is hit, retriggers audio
   const [tool, setTool] = useState('paint');
+  const [projectName, setProjectName] = useState('Untitled');
+
+  // ---------- Undo / redo ----------
+  // Live ref of project state so history helpers don't re-bind every render.
+  const projectStateRef = useRef({ balls, steps, bpm, projectName });
+  useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName }; }, [balls, steps, bpm, projectName]);
+  const historyRef = useRef({ past: [], future: [] });
+  const HISTORY_CAP = 100;
+  const pushHistory = useCallback(() => {
+    historyRef.current.past.push({ ...projectStateRef.current });
+    if (historyRef.current.past.length > HISTORY_CAP) historyRef.current.past.shift();
+    historyRef.current.future = [];
+  }, []);
+  const applySnapshot = useCallback((snap) => {
+    setBalls(snap.balls);
+    setSteps(snap.steps);
+    setBpm(snap.bpm);
+    if (typeof snap.projectName === 'string') setProjectName(snap.projectName);
+    setSelectedStepId(null);
+    setSelectedIds(new Set());
+  }, []);
+  const undo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.past.length === 0) return;
+    h.future.push({ ...projectStateRef.current });
+    applySnapshot(h.past.pop());
+  }, [applySnapshot]);
+  const redo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.future.length === 0) return;
+    h.past.push({ ...projectStateRef.current });
+    applySnapshot(h.future.pop());
+  }, [applySnapshot]);
 
   const palette = t.paletteMode === 'custom'
     ? customPalette
@@ -750,6 +791,25 @@ function App() {
     return true;
   }, []);
 
+  // Resize every clip in `group` by the same length delta. Per-clip we clamp
+  // to ≥1 step and stop the clip from sliding past TOTAL_STEPS so the dragged
+  // master can't push the others off the timeline. Single setSteps so the
+  // batch lands atomically.
+  const bulkResizeGroup = useCallback((group, dLen) => {
+    setSteps(prev => {
+      const idToNew = new Map();
+      for (const m of group) {
+        const newLen = Math.max(1, Math.min(TOTAL_STEPS - m.origStart, m.origLength + dLen));
+        idToNew.set(m.id, newLen);
+      }
+      const out = {};
+      for (const k in prev) {
+        out[k] = prev[k].map(s => idToNew.has(s.id) ? { ...s, length: idToNew.get(s.id) } : s);
+      }
+      return out;
+    });
+  }, [TOTAL_STEPS]);
+
   // Bulk re-place a group of clips for cross-track multi-clip drag. Each member
   // returns to its drag-start clip data, then is repositioned by `dStart` on
   // the time axis and `rdTracks` on the track axis. Done in one setSteps so
@@ -856,6 +916,7 @@ function App() {
   // Overlap with existing clips is allowed (visually warned downstream).
   const pasteClipboard = useCallback(() => {
     if (!clipboard || !clipboard.clips.length) return;
+    pushHistory();
     setSteps(prev => {
       const out = { ...prev };
       const newIds = [];
@@ -887,6 +948,7 @@ function App() {
   // New project: reset balls/steps/transport. Audio kept (so user can retry against same track).
   const newProject = useCallback(() => {
     if (!confirm('Start a new project? Unsaved changes will be lost.')) return;
+    pushHistory();
     const emptySteps = {};
     initialBalls.forEach((b) => {
       emptySteps[b.id + '-A'] = [];
@@ -895,6 +957,7 @@ function App() {
     setBalls(initialBalls);
     setSteps(emptySteps);
     setBpm(120);
+    setProjectName('Untitled');
     setPlayhead(0);
     setPlaying(false);
     setSelectedStepId(null);
@@ -906,7 +969,8 @@ function App() {
   const exportProject = useCallback(() => {
     const payload = {
       kind: 'lbproj',
-      version: 1,
+      version: 2,
+      name: projectName,
       bpm,
       balls,
       steps,
@@ -918,10 +982,10 @@ function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'lightseq_' + Date.now() + '.lbproj';
+    a.download = sanitizeFilename(projectName) + '.lbproj';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [bpm, balls, steps, audio, t]);
+  }, [projectName, bpm, balls, steps, audio, t]);
 
   // Import a .lbproj. Restores balls/steps/bpm/tweaks; audio must be re-imported separately.
   const importProject = useCallback((file) => {
@@ -930,9 +994,18 @@ function App() {
       try {
         const data = JSON.parse(reader.result);
         if (data.kind !== 'lbproj') throw new Error('Not a LightSeq project file.');
+        pushHistory();
         if (data.balls) setBalls(data.balls);
         if (data.steps) setSteps(data.steps);
         if (typeof data.bpm === 'number') setBpm(data.bpm);
+        // v2 stores name. v1 has no name field — fall back to the file name
+        // (minus the extension) so reopened older projects still get something
+        // sensible in the title bar.
+        if (typeof data.name === 'string' && data.name) {
+          setProjectName(data.name);
+        } else if (file && file.name) {
+          setProjectName(file.name.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
+        }
         if (data.tweaks) {
           for (const k in data.tweaks) setTweak(k, data.tweaks[k]);
         }
@@ -1135,11 +1208,11 @@ function App() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'lightseq_export_' + Date.now() + '.zip';
+      a.download = sanitizeFilename(projectName) + '_export.zip';
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       URL.revokeObjectURL(url);
     });
-  }, [balls, steps, bpm]);
+  }, [balls, steps, bpm, projectName]);
 
   const onEraseAt = useCallback((trackKey, atStep) => {
     setSteps(prev => {
@@ -1150,6 +1223,7 @@ function App() {
 
   const addBall = () => {
     if (balls.length >= 16) return;
+    pushHistory();
     const i = balls.length;
     const id = 'B' + String(i + 1).padStart(2, '0');
     const color = palette[i % palette.length].hex;
@@ -1158,6 +1232,7 @@ function App() {
   };
   const removeBall = (ballId) => {
     if (balls.length <= 1) return;
+    pushHistory();
     setBalls(balls.filter(b => b.id !== ballId));
     setSteps(prev => {
       const out = { ...prev };
@@ -1185,6 +1260,14 @@ function App() {
     const onKey = (e) => {
       if (e.target.tagName === 'INPUT') return;
       const mod = e.ctrlKey || e.metaKey;
+      // Undo / redo — keep above copy/paste so the modifier never falls through.
+      if (mod && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault(); undo(); return;
+      }
+      if ((mod && e.shiftKey && (e.key === 'z' || e.key === 'Z')) ||
+          (mod && !e.shiftKey && (e.key === 'y' || e.key === 'Y'))) {
+        e.preventDefault(); redo(); return;
+      }
       if (mod && (e.key === 'c' || e.key === 'C')) {
         e.preventDefault();
         copySelected();
@@ -1195,13 +1278,30 @@ function App() {
         pasteClipboard();
         return;
       }
+      if (mod && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        const all = new Set();
+        for (const k in steps) for (const s of (steps[k] || [])) all.add(s.id);
+        setSelectedIds(all);
+        setSelectedStepId(all.size === 1 ? [...all][0] : null);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (selectedIds.size > 0 || selectedStepId) {
+          setSelectedIds(new Set());
+          setSelectedStepId(null);
+        }
+        return;
+      }
       if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedIds.size > 0) {
+          pushHistory();
           selectedIds.forEach(id => deleteStepById(id));
           setSelectedIds(new Set());
           setSelectedStepId(null);
         } else if (selectedStepId) {
+          pushHistory();
           deleteStep(selectedStepId);
         }
       }
@@ -1228,7 +1328,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('message', onMsg);
     };
-  }, [selectedStepId, selectedIds, deleteStep, deleteStepById, copySelected, pasteClipboard]);
+  }, [selectedStepId, selectedIds, steps, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory]);
 
   return (
     <div className={"app theme-" + t.theme} data-screen-label="Sequencer">
@@ -1245,6 +1345,9 @@ function App() {
         onNewProject={newProject}
         onExportProject={exportProject}
         onImportProject={importProject}
+        pushHistory={pushHistory}
+        projectName={projectName}
+        setProjectName={setProjectName}
       />
 
       <CommandBar
@@ -1295,12 +1398,14 @@ function App() {
             updateStep={updateStep}
             moveStepToTrack={moveStepToTrack}
             bulkMoveGroup={bulkMoveGroup}
+            bulkResizeGroup={bulkResizeGroup}
             deleteStepById={deleteStepById}
             totalBars={TOTAL_BARS}
             totalSteps={TOTAL_STEPS}
             stepW={stepW}
             setStepW={setStepW}
             onScroll={setScrollLeft}
+            pushHistory={pushHistory}
           />
         </div>
 
@@ -1359,7 +1464,7 @@ function App() {
             value={Number(cal.diffuser.sigmaPct.toFixed(2))}
             onChange={v => setCal(prev => ({ ...prev, diffuser: { sigmaPct: v } }))} />
           <TweakButton label="Load test pattern"
-            onClick={() => loadCalibrationTestPattern({ setBalls, setSteps, setBpm })} />
+            onClick={() => { pushHistory(); loadCalibrationTestPattern({ setBalls, setSteps, setBpm }); }} />
           <TweakButton label="Export firmware header"
             onClick={() => downloadBlob('calibration.h', 'text/x-c', buildFirmwareHeader(cal))} />
           <TweakButton label="Export JSON"
@@ -1391,7 +1496,7 @@ function App() {
 }
 
 // ============ TOP BAR ============
-function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject }) {
+function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, setPlayhead, tool, setTool, gridRes, setGridRes, snapToGrid, setSnapToGrid, beatsPerBar = 4, onExport, onNewProject, onExportProject, onImportProject, pushHistory, projectName, setProjectName }) {
   const RESOLUTIONS = ['1/2','1/3','1/4','1/6','1/8','1/12','1/16','1/24','1/32','1/64'];
   const stepsPerBeat = 16 / beatsPerBar;
   const bar = Math.floor(playhead / 16) + 1;
@@ -1417,7 +1522,22 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         <div className="brand-mark"><span/><span/><span/></div>
         <div className="brand-text">
           <div className="brand-title">LIGHTSEQ</div>
-          <div className="brand-sub">LED Sequencer · Studio</div>
+          <input className="project-name mono" type="text"
+            value={projectName ?? ''}
+            spellCheck={false}
+            maxLength={64}
+            placeholder="Untitled"
+            title="Project name (used as the saved filename)"
+            onFocus={() => pushHistory && pushHistory()}
+            onChange={(e) => setProjectName && setProjectName(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter or Esc dismisses the field instead of inserting a newline.
+              if (e.key === 'Enter' || e.key === 'Escape') e.currentTarget.blur();
+            }}
+            onBlur={(e) => {
+              const v = (e.target.value || '').trim();
+              if (!v && setProjectName) setProjectName('Untitled');
+            }} />
         </div>
       </div>
 
@@ -1434,6 +1554,7 @@ function TopBar({ bpm, setBpm, playing, setPlaying, loop, setLoop, playhead, set
         <div className="readout">
           <div className="ro-label">BPM</div>
           <input className="ro-input" type="number" value={bpm} min="40" max="240"
+            onFocus={() => pushHistory && pushHistory()}
             onChange={e => setBpm(parseInt(e.target.value)||120)} />
         </div>
         <div className="readout">
@@ -1733,13 +1854,92 @@ function LEDDot({ lit, label }) {
 }
 
 // ============ TIMELINE ============
-function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll }) {
+function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, gridSubdiv, beatsPerBar = 4, selectedStepId, setSelectedStepId, selectedIds, setSelectedIds, onPaint, onErase, updateStep, moveStepToTrack, bulkMoveGroup, bulkResizeGroup, deleteStepById, totalBars, totalSteps, stepW, setStepW, onScroll, pushHistory }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const [drag, setDrag] = useState(null);
   const [paintDrag, setPaintDrag] = useState(false);
   const [marquee, setMarquee] = useState(null); // { x0,y0,x1,y1 }
+  // Tracks whether a Ctrl/Cmd modifier is currently held so the cursor can
+  // reflect the temporary-Select behavior in Paint mode. Window blur clears
+  // the state because the keyup may land on a different page.
+  const [modSelect, setModSelect] = useState(false);
+  // True while the user is holding the right mouse button in Paint mode —
+  // turns the gesture into a brush-erase: hover over any clip while held
+  // and it deletes.
+  const [rightDelete, setRightDelete] = useState(false);
   const gridRef = useRef(null);
+  useEffect(() => {
+    const sync = (e) => setModSelect(!!(e.ctrlKey || e.metaKey));
+    const clear = () => setModSelect(false);
+    window.addEventListener('keydown', sync);
+    window.addEventListener('keyup', sync);
+    window.addEventListener('blur', clear);
+    return () => {
+      window.removeEventListener('keydown', sync);
+      window.removeEventListener('keyup', sync);
+      window.removeEventListener('blur', clear);
+    };
+  }, []);
+
+  // Brush-erase while the right mouse button is held in Paint mode. The
+  // initial clip under the cursor is deleted by the mousedown that flips
+  // this state on; mousemove handles dragging across more clips. body
+  // gets a .right-deleting class so the cursor stays as the delete icon
+  // even when the pointer is over child elements that would otherwise
+  // override it.
+  useEffect(() => {
+    if (!rightDelete) return;
+    document.body.classList.add('right-deleting');
+    let lastId = null;
+    const onMove = (e) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const clipEl = el && el.closest && el.closest('.clip');
+      const id = clipEl && clipEl.dataset && clipEl.dataset.clipId;
+      if (id && id !== lastId) {
+        deleteStepById(id);
+        lastId = id;
+      } else if (!id) {
+        lastId = null;
+      }
+    };
+    const onUp = (e) => {
+      // Any mouseup ends the gesture; if only the left button is somehow
+      // released first we still bail — releasing right is the common case.
+      if (e.button === 2 || e.button === undefined || !e.buttons) {
+        setRightDelete(false);
+      }
+    };
+    const onMenu = (e) => e.preventDefault();
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    // Suppress the browser context menu that would otherwise fire when the
+    // right button is released, even though Clip / row handlers already
+    // preventDefault — this is a safety net for events bubbling outside
+    // those elements (ruler, label gutter, padding, etc).
+    window.addEventListener('contextmenu', onMenu);
+    return () => {
+      document.body.classList.remove('right-deleting');
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('contextmenu', onMenu);
+    };
+  }, [rightDelete, deleteStepById]);
+
+  // Right-mousedown anywhere inside the timeline starts a brush-erase in
+  // Paint mode. We hit-test through elementFromPoint so a click on either
+  // a clip or empty grid both work, and we push one history entry per
+  // gesture (not per clip deleted).
+  const onTimelineMouseDown = (e) => {
+    if (e.button !== 2 || tool !== 'paint') return;
+    e.preventDefault();
+    pushHistory && pushHistory();
+    setRightDelete(true);
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const clipEl = el && el.closest && el.closest('.clip');
+    const id = clipEl && clipEl.dataset && clipEl.dataset.clipId;
+    if (id) deleteStepById(id);
+  };
 
   const STEP_W = stepW;
   const totalW = STEP_W * TOTAL_STEPS;
@@ -1767,16 +1967,23 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   };
 
   const onMouseDownGrid = (e, trackKey, rowEl) => {
+    // Right / middle click is handled by onContextMenu — never paint or erase.
+    if (e.button !== 0) return;
     if (e.target.classList.contains('clip') || e.target.closest('.clip')) return;
     const rect = rowEl.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const start = xToSnappedStep(x);
-    if (tool === 'paint') {
+    // Paint-mode shortcut: holding Ctrl/Cmd temporarily acts as the Select
+    // tool so the user can rubber-band without leaving paint.
+    const effectiveTool = (tool === 'paint' && (e.ctrlKey || e.metaKey)) ? 'select' : tool;
+    if (effectiveTool === 'paint') {
+      pushHistory && pushHistory();
       onPaint(trackKey, start);
       setPaintDrag(true);
-    } else if (tool === 'erase') {
+    } else if (effectiveTool === 'erase') {
+      pushHistory && pushHistory();
       onErase(trackKey, xToStep(x));
-    } else if (tool === 'select') {
+    } else if (effectiveTool === 'select') {
       // Marquee coords are stored in .tl-grid content space — convert from
       // viewport by adding the timeline's scroll offset and subtracting the
       // sticky ruler that sits above the grid.
@@ -1785,7 +1992,9 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
       const mx = e.clientX - gridRect.left + el.scrollLeft;
       const my = e.clientY - gridRect.top + el.scrollTop - RULER_H;
       setMarquee({ x0: mx, y0: my, x1: mx, y1: my });
-      if (!e.shiftKey) {
+      // Shift / Ctrl / Cmd → additive marquee: keep existing selection and
+      // union with anything inside the box on mouseup.
+      if (!(e.shiftKey || e.ctrlKey || e.metaKey)) {
         setSelectedIds(new Set());
         setSelectedStepId(null);
       }
@@ -1793,6 +2002,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   };
 
   const onRulerMouseDown = (e) => {
+    if (e.button !== 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const setFromX = (clientX) => {
       const x = clientX - rect.left;
@@ -1859,14 +2069,23 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
         const maxEnd = TOTAL_STEPS;
         const newEnd = Math.min(maxEnd, snapToGrid ? snapAbs(drag.origStart + drag.origLength + dxSteps) : drag.origStart + drag.origLength + dxSteps);
         const nl = Math.max(subdivStep, newEnd - drag.origStart);
-        updateStep(drag.stepId, { length: nl });
+        if (drag.group) {
+          // Master clip's snapped end determines the shared length delta; the
+          // other clips in the group get the same delta without re-snapping
+          // (snapping each clip individually would break their relative
+          // lengths). bulkResizeGroup clamps per clip so trailing clips can't
+          // run past TOTAL_STEPS.
+          bulkResizeGroup(drag.group, nl - drag.origLength);
+        } else {
+          updateStep(drag.stepId, { length: nl });
+        }
       }
     };
     const onUp = () => setDrag(null);
     window.addEventListener('mousemove', onMove);
     window.addEventListener('mouseup', onUp);
     return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); document.body.classList.remove('dragging'); };
-  }, [drag, snapToGrid, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, trackOrder, TOTAL_STEPS, STEP_W]);
+  }, [drag, snapToGrid, subdivStep, updateStep, moveStepToTrack, bulkMoveGroup, bulkResizeGroup, trackOrder, TOTAL_STEPS, STEP_W]);
 
   useEffect(() => {
     if (!paintDrag) return;
@@ -1963,7 +2182,14 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   }, [setStepW]);
 
   return (
-    <div className="timeline" ref={gridRef} onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
+    <div className={"timeline tool-" + (
+        (tool === 'paint' && rightDelete) ? 'erase' :
+        (tool === 'paint' && modSelect) ? 'select' :
+        tool
+      )}
+      ref={gridRef}
+      onMouseDown={onTimelineMouseDown}
+      onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
       <div className="tl-ruler" onMouseDown={onRulerMouseDown} style={{ width: totalW }}>
         {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => {
           const isBar = i % 4 === 0;
@@ -2002,6 +2228,12 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                       ].join(', '),
                     }}
                     onMouseDown={e => onMouseDownGrid(e, trackKey, e.currentTarget)}
+                    onContextMenu={e => {
+                      // The right-mousedown handler on the timeline root
+                      // handles the actual brush-erase; here we just suppress
+                      // the browser context menu in Paint mode.
+                      if (tool === 'paint') e.preventDefault();
+                    }}
                     onMouseEnter={e => {
                       if (paintDrag && tool === 'paint') {
                         const rect = e.currentTarget.getBoundingClientRect();
@@ -2031,10 +2263,35 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                           overlapping={overlapIds.has(s.id)}
                           playhead={playhead}
                           tool={tool}
-                          onSelect={() => { setSelectedStepId(s.id); setSelectedIds(new Set([s.id])); }}
-                          onErase={() => onErase(trackKey, s.start)}
+                          onSelect={(ev) => {
+                            // Ctrl/Cmd-click → toggle this clip in/out of the
+                            // multi-selection; plain click → single-select.
+                            if (ev && (ev.ctrlKey || ev.metaKey)) {
+                              const had = selectedIds.has(s.id);
+                              setSelectedIds(prev => {
+                                const next = new Set(prev);
+                                if (had) next.delete(s.id); else next.add(s.id);
+                                return next;
+                              });
+                              // `selected` checks selectedStepId OR selectedIds, so
+                              // leaving selectedStepId pinned to s.id after a
+                              // deselect keeps the clip looking selected. Clear
+                              // it on deselect; point it at s.id on select.
+                              setSelectedStepId(prev => had ? (prev === s.id ? null : prev) : s.id);
+                            } else {
+                              setSelectedStepId(s.id);
+                              setSelectedIds(new Set([s.id]));
+                            }
+                          }}
+                          onErase={() => { pushHistory && pushHistory(); onErase(trackKey, s.start); }}
                           onMoveStart={(e) => {
                             e.stopPropagation();
+                            // Ctrl/Cmd-click on a clip is selection-only; the
+                            // click handler below toggles membership. Skip drag
+                            // and history push so deselecting doesn't burn an
+                            // undo slot.
+                            if (e.ctrlKey || e.metaKey) return;
+                            pushHistory && pushHistory();
                             // If the grabbed clip is part of a multi-selection, drag the whole
                             // group together — also across LEDs/balls. Otherwise become the
                             // sole selection so single-clip drag behaves as before.
@@ -2073,9 +2330,26 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                             });
                           }}
                           onResizeStart={(e) => {
+                            if (e.button !== 0) return;
                             e.stopPropagation();
+                            // If the grabbed edge belongs to a multi-selection,
+                            // resize all selected clips by the same delta —
+                            // same group-drag idiom as move.
+                            const inGroup = selectedIds.has(s.id) && selectedIds.size > 1;
+                            let group = null;
+                            if (inGroup) {
+                              group = [];
+                              for (const tk in steps) {
+                                for (const c of (steps[tk] || [])) {
+                                  if (selectedIds.has(c.id)) {
+                                    group.push({ id: c.id, origStart: c.start, origLength: c.length });
+                                  }
+                                }
+                              }
+                            }
+                            pushHistory && pushHistory();
                             setSelectedStepId(s.id);
-                            setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length });
+                            setDrag({ stepId: s.id, trackKey, mode: 'resize', startX: e.clientX, origStart: s.start, origLength: s.length, group });
                           }}
                         />
                       ));
@@ -2179,6 +2453,9 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
   }
 
   const handleMouseDown = (e) => {
+    // Non-left buttons go through onContextMenu so right-click never starts
+    // a drag or selection.
+    if (e.button !== 0) return;
     e.stopPropagation();
     if (tool === 'erase') { onErase(); return; }
     // paint and select: act as a move handle. onMoveStart selects the clip;
@@ -2190,9 +2467,17 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
   return (
     <div className={"clip " + (selected?'sel ':'') + (overlapping?'overlap ':'') + "tool-" + tool}
       style={{ left, width: w, cursor }}
+      data-clip-id={step.id}
       title={overlapping ? 'Overlaps another clip on this track' : undefined}
       onMouseDown={handleMouseDown}
-      onClick={(e) => { e.stopPropagation(); onSelect(); }}
+      onContextMenu={(e) => {
+        // The actual delete happens on right-mousedown at the Timeline
+        // level (see rightDelete in Timeline) so the same gesture can
+        // brush across multiple clips. Here we only need to suppress the
+        // browser's native context menu in Paint mode.
+        if (tool === 'paint') { e.preventDefault(); e.stopPropagation(); }
+      }}
+      onClick={(e) => { e.stopPropagation(); onSelect(e); }}
     >
       <div className="clip-fill" style={{
         background: fill,
