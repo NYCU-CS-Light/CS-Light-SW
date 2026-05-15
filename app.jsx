@@ -1429,8 +1429,9 @@ function App() {
         palette={palette}
         selectedColor={selectedColor}
         setSelectedColor={setSelectedColor}
-        onSwatchChange={(i, hex) => { pushHistory(); setSwatch(i, hex); }}
-        onSwatchAdd={(hex) => { pushHistory(); addSwatch(hex); }}
+        pushHistory={pushHistory}
+        setSwatch={setSwatch}
+        addSwatch={addSwatch}
         onSwatchRemove={(i) => {
           if (palette.length <= 1) return;
           pushHistory();
@@ -1719,10 +1720,17 @@ function formatTime(stepPos, bpm) {
 }
 
 // ============ COMMAND BAR ============
-function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor, onSwatchChange, onSwatchAdd, onSwatchRemove }) {
+function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor, pushHistory, setSwatch, addSwatch, onSwatchRemove }) {
   const [popover, setPopover] = useState(null); // { index, x, y }
   const popoverRef = useRef(null);
   const addPickerRef = useRef(null);
+  // The native <input type="color"> fires onChange for every intermediate hue
+  // while the user drags inside the system picker. Without debouncing, the +
+  // flow would append one swatch per preview color ("一滑過去就選了一坨"),
+  // and the edit flow would push one history entry per preview hue. We commit
+  // the final value 250ms after the last change instead.
+  const addCommitRef = useRef(null);   // { timer, lastValue }
+  const editCommitRef = useRef(null);  // { timer, index, pushed }
 
   useEffect(() => {
     if (!popover) return;
@@ -1738,8 +1746,53 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
     };
   }, [popover]);
 
+  // Flush any pending edit when the popover closes so the final hue lands
+  // even if the debounce timer hasn't fired yet.
+  useEffect(() => {
+    if (popover) return;
+    const ec = editCommitRef.current;
+    if (ec && ec.timer != null) {
+      clearTimeout(ec.timer);
+      if (ec.lastValue != null) setSwatch(ec.index, ec.lastValue);
+    }
+    editCommitRef.current = null;
+  }, [popover, setSwatch]);
+
   const openAddPicker = () => {
     if (addPickerRef.current) addPickerRef.current.click();
+  };
+
+  const scheduleAddCommit = (hex) => {
+    const ref = addCommitRef.current || { timer: null, lastValue: null };
+    ref.lastValue = hex;
+    if (ref.timer) clearTimeout(ref.timer);
+    ref.timer = setTimeout(() => {
+      const v = ref.lastValue;
+      addCommitRef.current = null;
+      if (v) {
+        pushHistory && pushHistory();
+        addSwatch(v);
+      }
+    }, 250);
+    addCommitRef.current = ref;
+  };
+
+  const scheduleEditCommit = (index, hex) => {
+    let ref = editCommitRef.current;
+    if (!ref || ref.index !== index) {
+      // First edit for this swatch in this popover session — one history push covers
+      // the whole drag through the system picker.
+      pushHistory && pushHistory();
+      ref = { timer: null, index, lastValue: null, pushed: true };
+      editCommitRef.current = ref;
+    }
+    ref.lastValue = hex;
+    if (ref.timer) clearTimeout(ref.timer);
+    // Live-update the swatch so the user sees the color change as they pick.
+    setSwatch(index, hex);
+    // Keep the timer alive purely as a flush sentinel; nothing further to commit
+    // since setSwatch already ran with the latest value.
+    ref.timer = setTimeout(() => { ref.timer = null; }, 250);
   };
 
   return (
@@ -1783,12 +1836,7 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
             type="color"
             defaultValue="#ffffff"
             style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (onSwatchAdd) onSwatchAdd(v);
-              // Reset so picking the same color twice still fires onChange.
-              e.target.value = '#ffffff';
-            }}
+            onChange={(e) => scheduleAddCommit(e.target.value)}
           />
         </div>
       </div>
@@ -1802,7 +1850,7 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
             <input
               type="color"
               value={palette[popover.index]?.hex || '#000000'}
-              onChange={(e) => onSwatchChange && onSwatchChange(popover.index, e.target.value)} />
+              onChange={(e) => scheduleEditCommit(popover.index, e.target.value)} />
           </label>
           <button
             className="swatch-popover-remove"
