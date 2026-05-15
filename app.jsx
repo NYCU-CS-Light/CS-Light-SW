@@ -1239,6 +1239,21 @@ function App() {
         pasteClipboard();
         return;
       }
+      if (mod && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        const all = new Set();
+        for (const k in steps) for (const s of (steps[k] || [])) all.add(s.id);
+        setSelectedIds(all);
+        setSelectedStepId(all.size === 1 ? [...all][0] : null);
+        return;
+      }
+      if (e.key === 'Escape') {
+        if (selectedIds.size > 0 || selectedStepId) {
+          setSelectedIds(new Set());
+          setSelectedStepId(null);
+        }
+        return;
+      }
       if (e.code === 'Space') { e.preventDefault(); setPlaying(p => !p); }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (selectedIds.size > 0) {
@@ -1274,7 +1289,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('message', onMsg);
     };
-  }, [selectedStepId, selectedIds, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory]);
+  }, [selectedStepId, selectedIds, steps, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory]);
 
   return (
     <div className={"app theme-" + t.theme} data-screen-label="Sequencer">
@@ -1836,7 +1851,9 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
       const mx = e.clientX - gridRect.left + el.scrollLeft;
       const my = e.clientY - gridRect.top + el.scrollTop - RULER_H;
       setMarquee({ x0: mx, y0: my, x1: mx, y1: my });
-      if (!e.shiftKey) {
+      // Shift / Ctrl / Cmd → additive marquee: keep existing selection and
+      // union with anything inside the box on mouseup.
+      if (!(e.shiftKey || e.ctrlKey || e.metaKey)) {
         setSelectedIds(new Set());
         setSelectedStepId(null);
       }
@@ -2082,10 +2099,29 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                           overlapping={overlapIds.has(s.id)}
                           playhead={playhead}
                           tool={tool}
-                          onSelect={() => { setSelectedStepId(s.id); setSelectedIds(new Set([s.id])); }}
+                          onSelect={(ev) => {
+                            // Ctrl/Cmd-click → toggle this clip in/out of the
+                            // multi-selection; plain click → single-select.
+                            if (ev && (ev.ctrlKey || ev.metaKey)) {
+                              setSelectedIds(prev => {
+                                const next = new Set(prev);
+                                if (next.has(s.id)) next.delete(s.id); else next.add(s.id);
+                                return next;
+                              });
+                              setSelectedStepId(s.id);
+                            } else {
+                              setSelectedStepId(s.id);
+                              setSelectedIds(new Set([s.id]));
+                            }
+                          }}
                           onErase={() => { pushHistory && pushHistory(); onErase(trackKey, s.start); }}
                           onMoveStart={(e) => {
                             e.stopPropagation();
+                            // Ctrl/Cmd-click on a clip is selection-only; the
+                            // click handler below toggles membership. Skip drag
+                            // and history push so deselecting doesn't burn an
+                            // undo slot.
+                            if (e.ctrlKey || e.metaKey) return;
                             pushHistory && pushHistory();
                             // If the grabbed clip is part of a multi-selection, drag the whole
                             // group together — also across LEDs/balls. Otherwise become the
@@ -2245,7 +2281,7 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
       style={{ left, width: w, cursor }}
       title={overlapping ? 'Overlaps another clip on this track' : undefined}
       onMouseDown={handleMouseDown}
-      onClick={(e) => { e.stopPropagation(); onSelect(); }}
+      onClick={(e) => { e.stopPropagation(); onSelect(e); }}
     >
       <div className="clip-fill" style={{
         background: fill,
