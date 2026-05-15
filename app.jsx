@@ -1721,79 +1721,69 @@ function formatTime(stepPos, bpm) {
 
 // ============ COMMAND BAR ============
 function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor, pushHistory, setSwatch, addSwatch, onSwatchRemove }) {
-  const [popover, setPopover] = useState(null); // { index, x, y }
+  // Edit popover (right-click on a swatch).
+  const [popover, setPopover] = useState(null); // { index, x, y, draftHex, baseHex }
+  // Add popover (+ button). Picking a color here only updates the draft —
+  // creating the swatch requires clicking the explicit Create button.
+  const [addPopover, setAddPopover] = useState(null); // { x, y, draftHex }
   const popoverRef = useRef(null);
-  const addPickerRef = useRef(null);
-  // The native <input type="color"> fires onChange for every intermediate hue
-  // while the user drags inside the system picker. Without debouncing, the +
-  // flow would append one swatch per preview color ("一滑過去就選了一坨"),
-  // and the edit flow would push one history entry per preview hue. We commit
-  // the final value 250ms after the last change instead.
-  const addCommitRef = useRef(null);   // { timer, lastValue }
-  const editCommitRef = useRef(null);  // { timer, index, pushed }
+  const addPopoverRef = useRef(null);
+  const addBtnRef = useRef(null);
 
   useEffect(() => {
-    if (!popover) return;
+    if (!popover && !addPopover) return;
     const onDoc = (e) => {
-      if (popoverRef.current && !popoverRef.current.contains(e.target)) setPopover(null);
+      if (popover && popoverRef.current && !popoverRef.current.contains(e.target)) {
+        setPopover(null);
+      }
+      if (addPopover && addPopoverRef.current && !addPopoverRef.current.contains(e.target)) {
+        // Click outside discards the draft — the user must press Create to commit.
+        setAddPopover(null);
+      }
     };
-    const onKey = (e) => { if (e.key === 'Escape') setPopover(null); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { setPopover(null); setAddPopover(null); }
+    };
     document.addEventListener('mousedown', onDoc);
     window.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('mousedown', onDoc);
       window.removeEventListener('keydown', onKey);
     };
-  }, [popover]);
+  }, [popover, addPopover]);
 
-  // Flush any pending edit when the popover closes so the final hue lands
-  // even if the debounce timer hasn't fired yet.
-  useEffect(() => {
-    if (popover) return;
-    const ec = editCommitRef.current;
-    if (ec && ec.timer != null) {
-      clearTimeout(ec.timer);
-      if (ec.lastValue != null) setSwatch(ec.index, ec.lastValue);
+  const openAddPopover = () => {
+    if (!addBtnRef.current) return;
+    const rect = addBtnRef.current.getBoundingClientRect();
+    setAddPopover({ x: rect.left, y: rect.bottom + 4, draftHex: '#ffffff' });
+  };
+
+  const openEditPopover = (i, btn) => {
+    const rect = btn.getBoundingClientRect();
+    // Snapshot the current color so Cancel can restore it — live-preview happens
+    // in the swatch as the user picks, but discarding closes without a commit.
+    pushHistory && pushHistory();
+    setPopover({ index: i, x: rect.left, y: rect.bottom + 4, baseHex: palette[i]?.hex || '#000000', draftHex: palette[i]?.hex || '#000000' });
+  };
+
+  const commitAdd = () => {
+    if (!addPopover) return;
+    pushHistory && pushHistory();
+    addSwatch(addPopover.draftHex);
+    setAddPopover(null);
+  };
+
+  const cancelEdit = () => {
+    // Restore the original color the swatch had when the popover opened.
+    if (popover && popover.baseHex && palette[popover.index]?.hex !== popover.baseHex) {
+      setSwatch(popover.index, popover.baseHex);
     }
-    editCommitRef.current = null;
-  }, [popover, setSwatch]);
-
-  const openAddPicker = () => {
-    if (addPickerRef.current) addPickerRef.current.click();
+    setPopover(null);
+    // The pushHistory at open is a no-op rollback for the user via Ctrl+Z if they
+    // change their mind later; here we just don't apply any further mutation.
   };
 
-  const scheduleAddCommit = (hex) => {
-    const ref = addCommitRef.current || { timer: null, lastValue: null };
-    ref.lastValue = hex;
-    if (ref.timer) clearTimeout(ref.timer);
-    ref.timer = setTimeout(() => {
-      const v = ref.lastValue;
-      addCommitRef.current = null;
-      if (v) {
-        pushHistory && pushHistory();
-        addSwatch(v);
-      }
-    }, 250);
-    addCommitRef.current = ref;
-  };
-
-  const scheduleEditCommit = (index, hex) => {
-    let ref = editCommitRef.current;
-    if (!ref || ref.index !== index) {
-      // First edit for this swatch in this popover session — one history push covers
-      // the whole drag through the system picker.
-      pushHistory && pushHistory();
-      ref = { timer: null, index, lastValue: null, pushed: true };
-      editCommitRef.current = ref;
-    }
-    ref.lastValue = hex;
-    if (ref.timer) clearTimeout(ref.timer);
-    // Live-update the swatch so the user sees the color change as they pick.
-    setSwatch(index, hex);
-    // Keep the timer alive purely as a flush sentinel; nothing further to commit
-    // since setSwatch already ran with the latest value.
-    ref.timer = setTimeout(() => { ref.timer = null; }, 250);
-  };
+  const commitEdit = () => { setPopover(null); };
 
   return (
     <div className="cmdbar">
@@ -1822,22 +1812,15 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
               onClick={() => setSelectedColor(i)}
               onContextMenu={(e) => {
                 e.preventDefault();
-                const rect = e.currentTarget.getBoundingClientRect();
-                setPopover({ index: i, x: rect.left, y: rect.bottom + 4 });
+                openEditPopover(i, e.currentTarget);
               }}
               title={c.name + (i < 8 ? ' · ' + (i+1) : '') + ' (right-click to edit)'} />
           ))}
           <button
+            ref={addBtnRef}
             className="swatch swatch-add"
-            onClick={openAddPicker}
+            onClick={openAddPopover}
             title="Add swatch">+</button>
-          <input
-            ref={addPickerRef}
-            type="color"
-            defaultValue="#ffffff"
-            style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
-            onChange={(e) => scheduleAddCommit(e.target.value)}
-          />
         </div>
       </div>
       <div className="cmdbar-hint mono">Pick a command + color, then click-drag on the grid to place.</div>
@@ -1850,14 +1833,42 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
             <input
               type="color"
               value={palette[popover.index]?.hex || '#000000'}
-              onChange={(e) => scheduleEditCommit(popover.index, e.target.value)} />
+              onChange={(e) => {
+                // Live preview — committed only when the user clicks Save. Cancel
+                // restores baseHex captured at open.
+                setSwatch(popover.index, e.target.value);
+                setPopover(p => p ? { ...p, draftHex: e.target.value } : p);
+              }} />
           </label>
-          <button
-            className="swatch-popover-remove"
-            disabled={palette.length <= 1}
-            onClick={() => { onSwatchRemove && onSwatchRemove(popover.index); setPopover(null); }}>
-            Remove
-          </button>
+          <div className="swatch-popover-actions">
+            <button
+              className="swatch-popover-remove"
+              disabled={palette.length <= 1}
+              onClick={() => { onSwatchRemove && onSwatchRemove(popover.index); setPopover(null); }}>
+              Remove
+            </button>
+            <div className="swatch-popover-spacer" />
+            <button className="swatch-popover-btn secondary" onClick={cancelEdit}>Cancel</button>
+            <button className="swatch-popover-btn primary" onClick={commitEdit}>Save</button>
+          </div>
+        </div>
+      )}
+      {addPopover && (
+        <div ref={addPopoverRef} className="swatch-popover"
+          style={{ left: addPopover.x, top: addPopover.y }}
+          onMouseDown={(e) => e.stopPropagation()}>
+          <label className="swatch-popover-row">
+            <span className="mono">New color</span>
+            <input
+              type="color"
+              value={addPopover.draftHex}
+              onChange={(e) => setAddPopover(p => p ? { ...p, draftHex: e.target.value } : p)} />
+          </label>
+          <div className="swatch-popover-preview" style={{ background: addPopover.draftHex }} />
+          <div className="swatch-popover-actions">
+            <button className="swatch-popover-btn secondary" onClick={() => setAddPopover(null)}>Cancel</button>
+            <button className="swatch-popover-btn primary" onClick={commitAdd}>Create</button>
+          </div>
         </div>
       )}
     </div>

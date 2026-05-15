@@ -356,6 +356,27 @@ input { font-family: inherit; }
 }
 .swatch-popover-remove:hover:not(:disabled) { background: #c0392b; color: white; border-color: #c0392b; }
 .swatch-popover-remove:disabled { opacity: 0.4; cursor: not-allowed; }
+.swatch-popover-actions {
+  display: flex; align-items: center; gap: 6px;
+  margin-top: 4px;
+}
+.swatch-popover-spacer { flex: 1; }
+.swatch-popover-btn {
+  background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 4px 10px; font-size: 11px; cursor: pointer;
+  font-family: var(--mono); letter-spacing: 0.04em;
+}
+.swatch-popover-btn:hover { background: var(--surface-2); }
+.swatch-popover-btn.primary {
+  background: var(--accent); color: var(--bg); border-color: var(--accent); font-weight: 700;
+}
+.swatch-popover-btn.primary:hover { filter: brightness(1.08); }
+.swatch-popover-preview {
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
 .cmdbar-hint { font-size: 9px; color: var(--text-faint); text-align: right; letter-spacing: 0.04em; }
 
 /* ================== TRACK LIST ================== */
