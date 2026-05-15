@@ -1527,6 +1527,7 @@ function App() {
             scrollLeft={scrollLeft}
             snapToGrid={snapToGrid}
             gridSubdiv={gridSubdiv}
+            beatsPerBar={beatsPerBar}
             updateAudio={updateAudio}
             pushHistory={pushHistory}
           />
@@ -1938,7 +1939,7 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
 }
 
 // ============ WAVEFORM TRACK ============
-function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onClear, totalBars, totalSteps, stepW, setStepW, scrollLeft, snapToGrid, gridSubdiv, updateAudio, pushHistory }) {
+function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onClear, totalBars, totalSteps, stepW, setStepW, scrollLeft, snapToGrid, gridSubdiv, beatsPerBar = 4, updateAudio, pushHistory }) {
   const TOTAL_STEPS = totalSteps;
   const TOTAL_BARS = totalBars;
   const fileRef = useRef(null);
@@ -2139,12 +2140,14 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
             </>
           )}
           </div>
-          {/* beat ticks */}
+          {/* Beat ticks — beatsPerBar follows the grid resolution so triplet
+              resolutions (1/3, 1/6, 1/12, 1/24) draw 3 beats per bar. The
+              step-width of one beat is STEPS_PER_BAR / beatsPerBar. */}
           <div className="wave-ticks">
-            {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => (
-              <div key={i} className={"wave-tick " + (i%4===0?'bar':'')}
-                style={{ left: i * STEP_W * 4 }}>
-                {i%4===0 && <span className="wave-tick-num mono">{(i/4)+1}</span>}
+            {Array.from({ length: TOTAL_BARS * beatsPerBar }).map((_, i) => (
+              <div key={i} className={"wave-tick " + (i%beatsPerBar===0?'bar':'')}
+                style={{ left: i * STEP_W * (STEPS_PER_BAR / beatsPerBar) }}>
+                {i%beatsPerBar===0 && <span className="wave-tick-num mono">{(i/beatsPerBar)+1}</span>}
               </div>
             ))}
           </div>
