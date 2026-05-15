@@ -557,12 +557,14 @@ function App() {
 
   // ---------- Undo / redo ----------
   // Live ref of project state so history helpers don't re-bind every render.
+  // audioFile is captured by reference, not cloned — every snapshot pointing at
+  // the same ArrayBuffer is free, and lets clear+undo restore the embed.
   const projectStateRef = useRef({ balls, steps, bpm, projectName, palette, audio });
   useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName, palette, audio }; }, [balls, steps, bpm, projectName, palette, audio]);
   const historyRef = useRef({ past: [], future: [] });
   const HISTORY_CAP = 100;
   const pushHistory = useCallback(() => {
-    historyRef.current.past.push({ ...projectStateRef.current });
+    historyRef.current.past.push({ ...projectStateRef.current, audioFile: audioFileRef.current });
     if (historyRef.current.past.length > HISTORY_CAP) historyRef.current.past.shift();
     historyRef.current.future = [];
   }, []);
@@ -573,6 +575,7 @@ function App() {
     if (typeof snap.projectName === 'string') setProjectName(snap.projectName);
     if (Array.isArray(snap.palette)) setPaletteAll(snap.palette);
     if (snap.audio !== undefined) setAudio(snap.audio);
+    if (snap.audioFile !== undefined) audioFileRef.current = snap.audioFile;
     setSelectedStepId(null);
     setSelectedIds(new Set());
   }, [setPaletteAll]);
@@ -667,24 +670,30 @@ function App() {
     return () => cancelAnimationFrame(raf);
   }, [playing, bpm, loop, steps, TOTAL_STEPS]);
 
+  // Raw audio file bytes — kept in a ref so they can be embedded into .lbproj
+  // exports without bloating the undo snapshots (which clone `audio` per push).
+  const audioFileRef = useRef(null); // { bytes: ArrayBuffer, mimeType: string }
+
   // ---------- Audio import + playback ----------
-  const importAudio = useCallback(async (file) => {
-    if (!file) return;
+  // Decode an ArrayBuffer of audio bytes into the in-memory audio state.
+  // Used both by the file-picker importer and by project loading (where the
+  // bytes come straight out of the .lbproj ZIP).
+  const loadAudioFromBytes = useCallback(async (bytes, name, mimeType, overrides) => {
     if (!audioCtxRef.current) {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       audioCtxRef.current = new Ctx();
     }
     const ctx = audioCtxRef.current;
-    const arr = await file.arrayBuffer();
+    // decodeAudioData detaches the ArrayBuffer; slice so the original copy
+    // we keep in audioFileRef remains usable for re-export.
+    const decodeCopy = bytes.slice(0);
     let buffer;
     try {
-      buffer = await ctx.decodeAudioData(arr);
+      buffer = await ctx.decodeAudioData(decodeCopy);
     } catch (e) {
       alert('Could not decode audio: ' + e.message);
-      return;
+      return false;
     }
-    // Build N peak buckets (max abs over both channels)
-    // Use higher N for long songs so the waveform stays resolved when stretched across many bars.
     const N = Math.min(8192, Math.max(512, Math.round(buffer.duration * 40)));
     const ch0 = buffer.getChannelData(0);
     const ch1 = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : null;
@@ -699,12 +708,12 @@ function App() {
       }
       peaks[i] = max;
     }
-    // Normalize
     const peak = Math.max(0.01, ...peaks);
     for (let i = 0; i < N; i++) peaks[i] /= peak;
 
+    audioFileRef.current = { bytes, mimeType: mimeType || 'audio/mpeg' };
     setAudio({
-      name: file.name,
+      name,
       peaks,
       durationSec: buffer.duration,
       buffer,
@@ -712,8 +721,16 @@ function App() {
       trimStartSec: 0,
       trimEndSec: 0,
       gain: 1,
+      ...(overrides || {}),
     });
+    return true;
   }, []);
+
+  const importAudio = useCallback(async (file) => {
+    if (!file) return;
+    const arr = await file.arrayBuffer();
+    await loadAudioFromBytes(arr, file.name, file.type);
+  }, [loadAudioFromBytes]);
 
   // Apply a partial patch to the loaded audio (clip moves, trim, volume).
   // Re-anchors the playback clock so visual/audio don't desync mid-edit.
@@ -1013,6 +1030,8 @@ function App() {
     setSteps(emptySteps);
     setBpm(120);
     setProjectName('Untitled');
+    setAudio(null);
+    audioFileRef.current = null;
     setPlayhead(0);
     setPlaying(false);
     setSelectedStepId(null);
@@ -1020,11 +1039,18 @@ function App() {
     setClipboard(null);
   }, []);
 
-  // Serialize project to a .lbproj (JSON) file. Audio is referenced by name only — not embedded.
-  const exportProject = useCallback(() => {
-    const payload = {
+  // Serialize project to a .lbproj. v4 is a ZIP container holding project.json
+  // plus the original audio file bytes so reopening restores music without a
+  // manual re-import. Falls back to writing legacy JSON (no ZIP wrapper) when
+  // there's no audio loaded — keeps the file readable by humans / older code.
+  const exportProject = useCallback(async () => {
+    const audioFile = audioFileRef.current;
+    const audioFilename = audio && audioFile
+      ? 'audio/' + sanitizeFilename(audio.name)
+      : null;
+    const manifest = {
       kind: 'lbproj',
-      version: 3,
+      version: audioFile ? 4 : 3,
       name: projectName,
       bpm,
       balls,
@@ -1037,11 +1063,21 @@ function App() {
         trimStartSec: audio.trimStartSec ?? 0,
         trimEndSec: audio.trimEndSec ?? 0,
         gain: audio.gain ?? 1,
+        file: audioFilename,
+        mimeType: audioFile ? audioFile.mimeType : undefined,
       } : null,
       tweaks: t,
       savedAt: new Date().toISOString(),
     };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    let blob;
+    if (audioFile) {
+      const zip = new JSZip();
+      zip.file('project.json', JSON.stringify(manifest, null, 2));
+      zip.file(audioFilename, audioFile.bytes);
+      blob = await zip.generateAsync({ type: 'blob' });
+    } else {
+      blob = new Blob([JSON.stringify(manifest, null, 2)], { type: 'application/json' });
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1050,48 +1086,74 @@ function App() {
     URL.revokeObjectURL(url);
   }, [projectName, bpm, balls, steps, audio, t, palette]);
 
-  // Import a .lbproj. Restores balls/steps/bpm/tweaks; audio must be re-imported separately.
-  const importProject = useCallback((file) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      try {
-        const data = JSON.parse(reader.result);
-        if (data.kind !== 'lbproj') throw new Error('Not a LightSeq project file.');
-        pushHistory();
-        if (data.balls) setBalls(data.balls);
-        if (data.steps) setSteps(data.steps);
-        if (typeof data.bpm === 'number') setBpm(data.bpm);
-        // v2 stores name. v1 has no name field — fall back to the file name
-        // (minus the extension) so reopened older projects still get something
-        // sensible in the title bar.
-        if (typeof data.name === 'string' && data.name) {
-          setProjectName(data.name);
-        } else if (file && file.name) {
-          setProjectName(file.name.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
-        }
-        if (data.tweaks) {
-          for (const k in data.tweaks) {
-            // paletteMode is a removed v2 tweak; ignore so the imported palette wins.
-            if (k === 'paletteMode') continue;
-            setTweak(k, data.tweaks[k]);
-          }
-        }
-        // v3+ embeds palette; v1/v2 don't — fall back to current localStorage palette.
-        if (Array.isArray(data.palette)) setPaletteAll(data.palette);
-        setPlayhead(0);
-        setPlaying(false);
-        setSelectedStepId(null);
-        setSelectedIds(new Set());
-        if (data.audio && data.audio.name) {
-          // Just notify — we don't re-attach the audio file because we never embedded it.
-          setTimeout(() => alert('Project loaded.\n\nThis project referenced an audio track (' + data.audio.name + '). Re-import it from the MUSIC panel to sync.'), 0);
-        }
-      } catch (err) {
-        alert('Could not load project: ' + err.message);
+  // Apply a parsed manifest to app state. Split out from importProject so the
+  // ZIP and legacy-JSON paths share one implementation.
+  const applyManifest = useCallback((data, fileName) => {
+    if (data.kind !== 'lbproj') throw new Error('Not a LightSeq project file.');
+    pushHistory();
+    if (data.balls) setBalls(data.balls);
+    if (data.steps) setSteps(data.steps);
+    if (typeof data.bpm === 'number') setBpm(data.bpm);
+    // v2+ stores name. v1 has no name field — fall back to the file name.
+    if (typeof data.name === 'string' && data.name) {
+      setProjectName(data.name);
+    } else if (fileName) {
+      setProjectName(fileName.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
+    }
+    if (data.tweaks) {
+      for (const k in data.tweaks) {
+        if (k === 'paletteMode') continue; // removed v2 tweak
+        setTweak(k, data.tweaks[k]);
       }
-    };
-    reader.readAsText(file);
-  }, [setTweak, setPaletteAll]);
+    }
+    if (Array.isArray(data.palette)) setPaletteAll(data.palette);
+    setPlayhead(0);
+    setPlaying(false);
+    setSelectedStepId(null);
+    setSelectedIds(new Set());
+  }, [pushHistory, setTweak, setPaletteAll]);
+
+  // Import a .lbproj. v4 is a ZIP with embedded audio; v1–v3 are bare JSON.
+  // Detect by peeking the first 4 bytes for the ZIP magic (PK\x03\x04).
+  const importProject = useCallback(async (file) => {
+    try {
+      const ab = await file.arrayBuffer();
+      const head = new Uint8Array(ab, 0, Math.min(4, ab.byteLength));
+      const isZip = head.length >= 4 && head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04;
+      if (isZip) {
+        const zip = await JSZip.loadAsync(ab);
+        const manifestEntry = zip.file('project.json');
+        if (!manifestEntry) throw new Error('Project archive missing project.json.');
+        const data = JSON.parse(await manifestEntry.async('string'));
+        applyManifest(data, file.name);
+        if (data.audio && data.audio.file) {
+          const audioEntry = zip.file(data.audio.file);
+          if (audioEntry) {
+            const bytes = await audioEntry.async('arraybuffer');
+            await loadAudioFromBytes(bytes, data.audio.name || 'audio', data.audio.mimeType, {
+              startStep: data.audio.startStep ?? 0,
+              trimStartSec: data.audio.trimStartSec ?? 0,
+              trimEndSec: data.audio.trimEndSec ?? 0,
+              gain: data.audio.gain ?? 1,
+            });
+          }
+        } else {
+          // Manifest without an embedded audio file — leave any existing track in place
+          // and clear if the manifest explicitly carries no audio.
+          if (!data.audio) { setAudio(null); audioFileRef.current = null; }
+        }
+      } else {
+        const text = new TextDecoder().decode(ab);
+        const data = JSON.parse(text);
+        applyManifest(data, file.name);
+        if (data.audio && data.audio.name) {
+          setTimeout(() => alert('Project loaded.\n\nThis project referenced an audio track (' + data.audio.name + ') but did not embed it. Re-import it from the MUSIC panel to sync.'), 0);
+        }
+      }
+    } catch (err) {
+      alert('Could not load project: ' + err.message);
+    }
+  }, [applyManifest, loadAudioFromBytes]);
 
   const exportTxt = useCallback(() => {
     // Refuse to export if any track has overlapping clips. The firmware plays
@@ -1457,7 +1519,7 @@ function App() {
             style={t.waveStyle}
             audio={audio}
             onImport={importAudio}
-            onClear={() => setAudio(null)}
+            onClear={() => { setAudio(null); audioFileRef.current = null; }}
             totalBars={TOTAL_BARS}
             totalSteps={TOTAL_STEPS}
             stepW={stepW}
