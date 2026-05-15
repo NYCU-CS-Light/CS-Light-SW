@@ -1868,18 +1868,23 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   };
 
   const onMouseDownGrid = (e, trackKey, rowEl) => {
+    // Right / middle click is handled by onContextMenu — never paint or erase.
+    if (e.button !== 0) return;
     if (e.target.classList.contains('clip') || e.target.closest('.clip')) return;
     const rect = rowEl.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const start = xToSnappedStep(x);
-    if (tool === 'paint') {
+    // Paint-mode shortcut: holding Ctrl/Cmd temporarily acts as the Select
+    // tool so the user can rubber-band without leaving paint.
+    const effectiveTool = (tool === 'paint' && (e.ctrlKey || e.metaKey)) ? 'select' : tool;
+    if (effectiveTool === 'paint') {
       pushHistory && pushHistory();
       onPaint(trackKey, start);
       setPaintDrag(true);
-    } else if (tool === 'erase') {
+    } else if (effectiveTool === 'erase') {
       pushHistory && pushHistory();
       onErase(trackKey, xToStep(x));
-    } else if (tool === 'select') {
+    } else if (effectiveTool === 'select') {
       // Marquee coords are stored in .tl-grid content space — convert from
       // viewport by adding the timeline's scroll offset and subtracting the
       // sticky ruler that sits above the grid.
@@ -2107,6 +2112,17 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                       ].join(', '),
                     }}
                     onMouseDown={e => onMouseDownGrid(e, trackKey, e.currentTarget)}
+                    onContextMenu={e => {
+                      // Paint-mode shortcut: right-click anywhere on a row
+                      // erases the clip under the cursor (if any). In other
+                      // tools, let the browser's native menu show.
+                      if (tool !== 'paint') return;
+                      e.preventDefault();
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const atStep = xToStep(e.clientX - rect.left);
+                      pushHistory && pushHistory();
+                      onErase(trackKey, atStep);
+                    }}
                     onMouseEnter={e => {
                       if (paintDrag && tool === 'paint') {
                         const rect = e.currentTarget.getBoundingClientRect();
@@ -2310,6 +2326,9 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
   }
 
   const handleMouseDown = (e) => {
+    // Non-left buttons go through onContextMenu so right-click never starts
+    // a drag or selection.
+    if (e.button !== 0) return;
     e.stopPropagation();
     if (tool === 'erase') { onErase(); return; }
     // paint and select: act as a move handle. onMoveStart selects the clip;
@@ -2323,6 +2342,13 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
       style={{ left, width: w, cursor }}
       title={overlapping ? 'Overlaps another clip on this track' : undefined}
       onMouseDown={handleMouseDown}
+      onContextMenu={(e) => {
+        // Paint-mode shortcut: right-click on a clip deletes it.
+        if (tool !== 'paint') return;
+        e.preventDefault();
+        e.stopPropagation();
+        onErase();
+      }}
       onClick={(e) => { e.stopPropagation(); onSelect(e); }}
     >
       <div className="clip-fill" style={{
