@@ -312,12 +312,50 @@ input { font-family: inherit; }
 .cmd-icon { font-size: 13px; line-height: 1; }
 .cmd-name { font-size: 11px; }
 
-.palette { display: flex; gap: 4px; }
+.palette {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  max-width: 360px;
+}
 .swatch {
   width: 22px; height: 22px;
   border-radius: 4px;
   border: 1px solid rgba(0,0,0,0.4);
+  cursor: pointer;
 }
+.swatch-add {
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: 14px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px dashed var(--border);
+}
+.swatch-add:hover { background: var(--surface-2); border-color: var(--accent); color: var(--accent); }
+.swatch-popover {
+  position: fixed;
+  z-index: 1000;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  display: flex; flex-direction: column; gap: 6px;
+  min-width: 140px;
+}
+.swatch-popover-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; font-size: 10px; letter-spacing: 0.1em; color: var(--text-dim);
+}
+.swatch-popover-row input[type="color"] {
+  width: 36px; height: 24px; padding: 0; border: 1px solid var(--border);
+  background: transparent; cursor: pointer;
+}
+.swatch-popover-remove {
+  background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 4px 8px; font-size: 11px; cursor: pointer;
+}
+.swatch-popover-remove:hover:not(:disabled) { background: #c0392b; color: white; border-color: #c0392b; }
+.swatch-popover-remove:disabled { opacity: 0.4; cursor: not-allowed; }
 .cmdbar-hint { font-size: 9px; color: var(--text-faint); text-align: right; letter-spacing: 0.04em; }
 
 /* ================== TRACK LIST ================== */

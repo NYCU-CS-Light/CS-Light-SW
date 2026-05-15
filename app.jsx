@@ -7,7 +7,6 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "previewLayout": "line",
   "showFade": true,
   "theme": "dark",
-  "paletteMode": "realworld",
   "ballGlow": 0.85,
   "waveStyle": "wave",
   "perfSimEnabled": false,
@@ -19,54 +18,33 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "perfSimTrail": 0.7
 }/*EDITMODE-END*/;
 
-// ============ PALETTES ============
-const PALETTES = {
-  chromatic: [
-    { name: 'Red',     hex: '#ff3b3b' },
-    { name: 'Orange',  hex: '#ff8a00' },
-    { name: 'Amber',   hex: '#ffc933' },
-    { name: 'Green',   hex: '#3ddc84' },
-    { name: 'Cyan',    hex: '#22d3ee' },
-    { name: 'Blue',    hex: '#3b82f6' },
-    { name: 'Violet',  hex: '#a855f7' },
-    { name: 'Magenta', hex: '#ec4899' },
-  ],
-  pastel: [
-    { name: 'Blush',   hex: '#ffb3ba' },
-    { name: 'Peach',   hex: '#ffd9a8' },
-    { name: 'Butter',  hex: '#fff5b3' },
-    { name: 'Mint',    hex: '#b8f2c9' },
-    { name: 'Sky',     hex: '#b5e2ff' },
-    { name: 'Lavender',hex: '#cdb8ff' },
-    { name: 'Rose',    hex: '#ffc0e0' },
-    { name: 'Sand',    hex: '#e8dcc4' },
-  ],
-  mono: [
-    { name: '15%',  hex: '#262626' },
-    { name: '30%',  hex: '#4a4a4a' },
-    { name: '45%',  hex: '#6e6e6e' },
-    { name: '60%',  hex: '#929292' },
-    { name: '75%',  hex: '#b6b6b6' },
-    { name: '85%',  hex: '#cfcfcf' },
-    { name: '95%',  hex: '#e8e8e8' },
-    { name: '100%', hex: '#ffffff' },
-  ],
-  // ROYGBIV + white, tuned for what a real RGB LED actually emits. Each swatch
-  // uses primaries only (no muddying mid-tones), so when the firmware's
-  // calibration LUT scales the channels, the on-device color reads cleanly as
-  // the named hue rather than as a wash of all three channels.
-  realworld: [
-    { name: 'Red',    hex: '#ff0000' },
-    { name: 'Orange', hex: '#ff7000' },
-    { name: 'Yellow', hex: '#ffff00' },
-    { name: 'Green',  hex: '#00ff00' },
-    { name: 'Blue',   hex: '#0000ff' },
-    { name: 'Indigo', hex: '#3000ff' },
-    { name: 'Purple', hex: '#a000ff' },
-    { name: 'White',  hex: '#ffffff' },
-    { name: 'Black',  hex: '#000000' },
-  ],
-};
+// ============ PALETTE SEED ============
+// ROYGBIV + white, tuned for what a real RGB LED actually emits. Each swatch
+// uses primaries only (no muddying mid-tones), so when the firmware's
+// calibration LUT scales the channels, the on-device color reads cleanly as
+// the named hue rather than as a wash of all three channels.
+const PALETTE_SEED = [
+  { name: 'Red',    hex: '#ff0000' },
+  { name: 'Orange', hex: '#ff7000' },
+  { name: 'Yellow', hex: '#ffff00' },
+  { name: 'Green',  hex: '#00ff00' },
+  { name: 'Blue',   hex: '#0000ff' },
+  { name: 'Indigo', hex: '#3000ff' },
+  { name: 'Purple', hex: '#a000ff' },
+  { name: 'White',  hex: '#ffffff' },
+];
+// initialBalls / seedSteps used to seed from PALETTES.chromatic; reuse this
+// neutral set so the initial demo content still has a varied appearance.
+const SEED_STEP_PALETTE = [
+  { name: 'Red',     hex: '#ff3b3b' },
+  { name: 'Orange',  hex: '#ff8a00' },
+  { name: 'Amber',   hex: '#ffc933' },
+  { name: 'Green',   hex: '#3ddc84' },
+  { name: 'Cyan',    hex: '#22d3ee' },
+  { name: 'Blue',    hex: '#3b82f6' },
+  { name: 'Violet',  hex: '#a855f7' },
+  { name: 'Magenta', hex: '#ec4899' },
+];
 
 // ============ COMMANDS ============
 // Each command is a kind of LED behavior placed as a clip.
@@ -156,7 +134,7 @@ function seedSteps() {
     out[b.id + '-B'] = [];
   });
   initialBalls.forEach((b, i) => {
-    const p = PALETTES.chromatic;
+    const p = SEED_STEP_PALETTE;
     out[b.id + '-A'].push({
       id: cryptoId(), start: i * 2, length: 2, command: 'breathe',
       color: p[i % p.length].hex, colorB: p[(i+3) % p.length].hex,
@@ -311,38 +289,67 @@ function loadCalibration() {
   } catch { return CAL_DEFAULTS; }
 }
 
-// ---- Custom palette (user-editable, persisted) ----
-const CUSTOM_PALETTE_LS_KEY = 'lightseq.customPalette.v1';
-const CUSTOM_PALETTE_DEFAULT = PALETTES.chromatic.map(c => ({ ...c }));
+// ---- Palette (user-editable, persisted, arbitrary length) ----
+const PALETTE_LS_KEY = 'lightseq.palette.v2';
+const PALETTE_DEFAULT = PALETTE_SEED.map(c => ({ ...c }));
 
-function loadCustomPalette() {
-  try {
-    const raw = localStorage.getItem(CUSTOM_PALETTE_LS_KEY);
-    if (!raw) return CUSTOM_PALETTE_DEFAULT;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length !== 8) return CUSTOM_PALETTE_DEFAULT;
-    return parsed.map((c, i) => ({
-      name: typeof c?.name === 'string' ? c.name : CUSTOM_PALETTE_DEFAULT[i].name,
-      hex:  /^#[0-9a-fA-F]{6}$/.test(c?.hex) ? c.hex : CUSTOM_PALETTE_DEFAULT[i].hex,
+function sanitizePalette(parsed) {
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const cleaned = parsed
+    .filter(c => c && /^#[0-9a-fA-F]{6}$/.test(c.hex))
+    .map(c => ({
+      name: typeof c.name === 'string' && c.name ? c.name : c.hex,
+      hex: c.hex,
     }));
-  } catch { return CUSTOM_PALETTE_DEFAULT; }
+  return cleaned.length ? cleaned : null;
 }
 
-function useCustomPalette() {
+function loadPalette() {
+  try {
+    const raw = localStorage.getItem(PALETTE_LS_KEY);
+    if (!raw) return PALETTE_DEFAULT;
+    return sanitizePalette(JSON.parse(raw)) || PALETTE_DEFAULT;
+  } catch { return PALETTE_DEFAULT; }
+}
+
+// Single source of truth for the in-app palette. localStorage acts as the
+// per-machine default; .lbproj projects can override transiently via setAll
+// without writing back. Returns mutators that all persist to localStorage,
+// plus a setAll that does not.
+function usePalette() {
   const { useState, useCallback } = React;
-  const [pal, setPalState] = useState(() => loadCustomPalette());
+  const [pal, setPalState] = useState(() => loadPalette());
+  const persist = (next) => {
+    try { localStorage.setItem(PALETTE_LS_KEY, JSON.stringify(next)); } catch {}
+  };
   const setSwatch = useCallback((index, hex) => {
     setPalState(prev => {
-      const next = prev.map((c, i) => i === index ? { ...c, hex } : c);
-      try { localStorage.setItem(CUSTOM_PALETTE_LS_KEY, JSON.stringify(next)); } catch {}
+      const next = prev.map((c, i) => i === index ? { ...c, hex, name: hex } : c);
+      persist(next);
       return next;
     });
   }, []);
-  const resetPalette = useCallback(() => {
-    try { localStorage.removeItem(CUSTOM_PALETTE_LS_KEY); } catch {}
-    setPalState(CUSTOM_PALETTE_DEFAULT);
+  const addSwatch = useCallback((hex) => {
+    setPalState(prev => {
+      const next = [...prev, { name: hex, hex }];
+      persist(next);
+      return next;
+    });
   }, []);
-  return [pal, setSwatch, resetPalette];
+  const removeSwatch = useCallback((index) => {
+    setPalState(prev => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((_, i) => i !== index);
+      persist(next);
+      return next;
+    });
+  }, []);
+  // Used when loading a .lbproj — overrides current palette in memory only.
+  const setAll = useCallback((arr) => {
+    const sanitized = sanitizePalette(arr);
+    if (sanitized) setPalState(sanitized);
+  }, []);
+  return { palette: pal, setSwatch, addSwatch, removeSwatch, setAll };
 }
 
 function useCalibration() {
@@ -524,7 +531,7 @@ function loadCalibrationTestPattern({ setBalls, setSteps, setBpm }) {
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [cal, setCal, resetCal] = useCalibration();
-  const [customPalette, setCustomSwatch, resetCustomPalette] = useCustomPalette();
+  const { palette, setSwatch, addSwatch, removeSwatch, setAll: setPaletteAll } = usePalette();
   const [balls, setBalls] = useState(initialBalls);
   const [steps, setSteps] = useState(seedSteps);
   const [selectedColor, setSelectedColor] = useState(0);
@@ -550,8 +557,8 @@ function App() {
 
   // ---------- Undo / redo ----------
   // Live ref of project state so history helpers don't re-bind every render.
-  const projectStateRef = useRef({ balls, steps, bpm, projectName });
-  useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName }; }, [balls, steps, bpm, projectName]);
+  const projectStateRef = useRef({ balls, steps, bpm, projectName, palette, audio });
+  useEffect(() => { projectStateRef.current = { balls, steps, bpm, projectName, palette, audio }; }, [balls, steps, bpm, projectName, palette, audio]);
   const historyRef = useRef({ past: [], future: [] });
   const HISTORY_CAP = 100;
   const pushHistory = useCallback(() => {
@@ -564,9 +571,11 @@ function App() {
     setSteps(snap.steps);
     setBpm(snap.bpm);
     if (typeof snap.projectName === 'string') setProjectName(snap.projectName);
+    if (Array.isArray(snap.palette)) setPaletteAll(snap.palette);
+    if (snap.audio !== undefined) setAudio(snap.audio);
     setSelectedStepId(null);
     setSelectedIds(new Set());
-  }, []);
+  }, [setPaletteAll]);
   const undo = useCallback(() => {
     const h = historyRef.current;
     if (h.past.length === 0) return;
@@ -580,9 +589,6 @@ function App() {
     applySnapshot(h.future.pop());
   }, [applySnapshot]);
 
-  const palette = t.paletteMode === 'custom'
-    ? customPalette
-    : (PALETTES[t.paletteMode] || PALETTES.chromatic);
   const [stepW, setStepW] = useState(22);
   const [scrollLeft, setScrollLeft] = useState(0);
   const gridSubdiv = { '1/2': 2, '1/3': 3, '1/4': 4, '1/6': 6, '1/8': 8, '1/12': 12, '1/16': 16, '1/24': 24, '1/32': 32, '1/64': 64 }[t.gridRes] || 16;
@@ -969,12 +975,20 @@ function App() {
   const exportProject = useCallback(() => {
     const payload = {
       kind: 'lbproj',
-      version: 2,
+      version: 3,
       name: projectName,
       bpm,
       balls,
       steps,
-      audio: audio ? { name: audio.name, durationSec: audio.durationSec } : null,
+      palette,
+      audio: audio ? {
+        name: audio.name,
+        durationSec: audio.durationSec,
+        startStep: audio.startStep ?? 0,
+        trimStartSec: audio.trimStartSec ?? 0,
+        trimEndSec: audio.trimEndSec ?? 0,
+        gain: audio.gain ?? 1,
+      } : null,
       tweaks: t,
       savedAt: new Date().toISOString(),
     };
@@ -985,7 +999,7 @@ function App() {
     a.download = sanitizeFilename(projectName) + '.lbproj';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }, [projectName, bpm, balls, steps, audio, t]);
+  }, [projectName, bpm, balls, steps, audio, t, palette]);
 
   // Import a .lbproj. Restores balls/steps/bpm/tweaks; audio must be re-imported separately.
   const importProject = useCallback((file) => {
@@ -1007,8 +1021,14 @@ function App() {
           setProjectName(file.name.replace(/\.lbproj$/i, '').replace(/\.json$/i, '') || 'Untitled');
         }
         if (data.tweaks) {
-          for (const k in data.tweaks) setTweak(k, data.tweaks[k]);
+          for (const k in data.tweaks) {
+            // paletteMode is a removed v2 tweak; ignore so the imported palette wins.
+            if (k === 'paletteMode') continue;
+            setTweak(k, data.tweaks[k]);
+          }
         }
+        // v3+ embeds palette; v1/v2 don't — fall back to current localStorage palette.
+        if (Array.isArray(data.palette)) setPaletteAll(data.palette);
         setPlayhead(0);
         setPlaying(false);
         setSelectedStepId(null);
@@ -1022,7 +1042,7 @@ function App() {
       }
     };
     reader.readAsText(file);
-  }, [setTweak]);
+  }, [setTweak, setPaletteAll]);
 
   const exportTxt = useCallback(() => {
     // Refuse to export if any track has overlapping clips. The firmware plays
@@ -1305,7 +1325,10 @@ function App() {
           deleteStep(selectedStepId);
         }
       }
-      if (!mod && e.key >= '1' && e.key <= '8') setSelectedColor(parseInt(e.key) - 1);
+      if (!mod && e.key >= '1' && e.key <= '8') {
+        const idx = parseInt(e.key) - 1;
+        if (idx < palette.length) setSelectedColor(idx);
+      }
       if (!mod && e.key === 'p') setTool('paint');
       if (!mod && e.key === 'e') setTool('erase');
       if (!mod && e.key === 's') setTool('select');
@@ -1328,7 +1351,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('message', onMsg);
     };
-  }, [selectedStepId, selectedIds, steps, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory]);
+  }, [selectedStepId, selectedIds, steps, deleteStep, deleteStepById, copySelected, pasteClipboard, undo, redo, pushHistory, palette.length]);
 
   return (
     <div className={"app theme-" + t.theme} data-screen-label="Sequencer">
@@ -1357,6 +1380,18 @@ function App() {
         palette={palette}
         selectedColor={selectedColor}
         setSelectedColor={setSelectedColor}
+        onSwatchChange={(i, hex) => { pushHistory(); setSwatch(i, hex); }}
+        onSwatchAdd={(hex) => { pushHistory(); addSwatch(hex); }}
+        onSwatchRemove={(i) => {
+          if (palette.length <= 1) return;
+          pushHistory();
+          removeSwatch(i);
+          setSelectedColor(prev => {
+            if (prev === i) return Math.max(0, i - 1);
+            if (prev > i) return prev - 1;
+            return prev;
+          });
+        }}
       />
 
       <div className="main">
@@ -1474,18 +1509,6 @@ function App() {
           <TweakButton label="Reset to defaults" onClick={resetCal} secondary />
         </TweakSection>
         <TweakSection title="Style">
-          <TweakRadio label="Palette" value={t.paletteMode}
-            options={[{value:'chromatic',label:'Chroma'},{value:'pastel',label:'Pastel'},{value:'mono',label:'Mono'},{value:'realworld',label:'Real'},{value:'custom',label:'Custom'}]}
-            onChange={v => setTweak('paletteMode', v)} />
-          {t.paletteMode === 'custom' && (
-            <>
-              {customPalette.map((c, i) => (
-                <TweakColor key={i} label={`Swatch ${i + 1}`} value={c.hex}
-                  onChange={(hex) => setCustomSwatch(i, hex)} />
-              ))}
-              <TweakButton label="Reset palette" onClick={resetCustomPalette} secondary />
-            </>
-          )}
           <TweakRadio label="Theme" value={t.theme}
             options={[{value:'dark',label:'Dark'},{value:'light',label:'Light'}]}
             onChange={v => setTweak('theme', v)} />
@@ -1643,7 +1666,29 @@ function formatTime(stepPos, bpm) {
 }
 
 // ============ COMMAND BAR ============
-function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor }) {
+function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, selectedColor, setSelectedColor, onSwatchChange, onSwatchAdd, onSwatchRemove }) {
+  const [popover, setPopover] = useState(null); // { index, x, y }
+  const popoverRef = useRef(null);
+  const addPickerRef = useRef(null);
+
+  useEffect(() => {
+    if (!popover) return;
+    const onDoc = (e) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target)) setPopover(null);
+    };
+    const onKey = (e) => { if (e.key === 'Escape') setPopover(null); };
+    document.addEventListener('mousedown', onDoc);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [popover]);
+
+  const openAddPicker = () => {
+    if (addPickerRef.current) addPickerRef.current.click();
+  };
+
   return (
     <div className="cmdbar">
       <div className="cmdbar-section">
@@ -1669,11 +1714,46 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
               className={"swatch " + (selectedColor===i?'on':'')}
               style={{ background: c.hex, boxShadow: selectedColor===i ? '0 0 0 2px var(--bg), 0 0 0 4px '+c.hex+', 0 0 14px '+c.hex : 'none' }}
               onClick={() => setSelectedColor(i)}
-              title={c.name + ' · ' + (i+1)} />
+              onContextMenu={(e) => {
+                e.preventDefault();
+                const rect = e.currentTarget.getBoundingClientRect();
+                setPopover({ index: i, x: rect.left, y: rect.bottom + 4 });
+              }}
+              title={c.name + (i < 8 ? ' · ' + (i+1) : '') + ' (right-click to edit)'} />
           ))}
+          <button
+            className="swatch swatch-add"
+            onClick={openAddPicker}
+            title="Add swatch">+</button>
+          <input
+            ref={addPickerRef}
+            type="color"
+            defaultValue="#ffffff"
+            style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+            onChange={(e) => { onSwatchAdd && onSwatchAdd(e.target.value); }}
+          />
         </div>
       </div>
       <div className="cmdbar-hint mono">Pick a command + color, then click-drag on the grid to place.</div>
+      {popover && (
+        <div ref={popoverRef} className="swatch-popover"
+          style={{ left: popover.x, top: popover.y }}
+          onMouseDown={(e) => e.stopPropagation()}>
+          <label className="swatch-popover-row">
+            <span className="mono">Color</span>
+            <input
+              type="color"
+              value={palette[popover.index]?.hex || '#000000'}
+              onChange={(e) => onSwatchChange && onSwatchChange(popover.index, e.target.value)} />
+          </label>
+          <button
+            className="swatch-popover-remove"
+            disabled={palette.length <= 1}
+            onClick={() => { onSwatchRemove && onSwatchRemove(popover.index); setPopover(null); }}>
+            Remove
+          </button>
+        </div>
+      )}
     </div>
   );
 }
