@@ -1783,7 +1783,12 @@ function CommandBar({ commands, selectedCommand, setSelectedCommand, palette, se
             type="color"
             defaultValue="#ffffff"
             style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
-            onChange={(e) => { onSwatchAdd && onSwatchAdd(e.target.value); }}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (onSwatchAdd) onSwatchAdd(v);
+              // Reset so picking the same color twice still fires onChange.
+              e.target.value = '#ffffff';
+            }}
           />
         </div>
       </div>
