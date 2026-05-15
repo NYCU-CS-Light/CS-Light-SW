@@ -45,6 +45,15 @@ body.dragging * {
   -webkit-user-select: none !important;
   cursor: inherit;
 }
+/* While the user is holding the right mouse button to brush-erase clips
+   in Paint mode, force the delete cursor everywhere so it stays visible
+   over clips, the ruler, label gutter, and any other inner element. */
+body.right-deleting,
+body.right-deleting * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: not-allowed !important;
+}
 .timeline, .clip, .tl-row-cells, .wave-canvas, .tl-ruler {
   user-select: none;
   -webkit-user-select: none;

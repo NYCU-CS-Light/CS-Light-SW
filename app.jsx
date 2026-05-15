@@ -1864,6 +1864,10 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   // reflect the temporary-Select behavior in Paint mode. Window blur clears
   // the state because the keyup may land on a different page.
   const [modSelect, setModSelect] = useState(false);
+  // True while the user is holding the right mouse button in Paint mode —
+  // turns the gesture into a brush-erase: hover over any clip while held
+  // and it deletes.
+  const [rightDelete, setRightDelete] = useState(false);
   const gridRef = useRef(null);
   useEffect(() => {
     const sync = (e) => setModSelect(!!(e.ctrlKey || e.metaKey));
@@ -1877,6 +1881,65 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
       window.removeEventListener('blur', clear);
     };
   }, []);
+
+  // Brush-erase while the right mouse button is held in Paint mode. The
+  // initial clip under the cursor is deleted by the mousedown that flips
+  // this state on; mousemove handles dragging across more clips. body
+  // gets a .right-deleting class so the cursor stays as the delete icon
+  // even when the pointer is over child elements that would otherwise
+  // override it.
+  useEffect(() => {
+    if (!rightDelete) return;
+    document.body.classList.add('right-deleting');
+    let lastId = null;
+    const onMove = (e) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const clipEl = el && el.closest && el.closest('.clip');
+      const id = clipEl && clipEl.dataset && clipEl.dataset.clipId;
+      if (id && id !== lastId) {
+        deleteStepById(id);
+        lastId = id;
+      } else if (!id) {
+        lastId = null;
+      }
+    };
+    const onUp = (e) => {
+      // Any mouseup ends the gesture; if only the left button is somehow
+      // released first we still bail — releasing right is the common case.
+      if (e.button === 2 || e.button === undefined || !e.buttons) {
+        setRightDelete(false);
+      }
+    };
+    const onMenu = (e) => e.preventDefault();
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    // Suppress the browser context menu that would otherwise fire when the
+    // right button is released, even though Clip / row handlers already
+    // preventDefault — this is a safety net for events bubbling outside
+    // those elements (ruler, label gutter, padding, etc).
+    window.addEventListener('contextmenu', onMenu);
+    return () => {
+      document.body.classList.remove('right-deleting');
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('contextmenu', onMenu);
+    };
+  }, [rightDelete, deleteStepById]);
+
+  // Right-mousedown anywhere inside the timeline starts a brush-erase in
+  // Paint mode. We hit-test through elementFromPoint so a click on either
+  // a clip or empty grid both work, and we push one history entry per
+  // gesture (not per clip deleted).
+  const onTimelineMouseDown = (e) => {
+    if (e.button !== 2 || tool !== 'paint') return;
+    e.preventDefault();
+    pushHistory && pushHistory();
+    setRightDelete(true);
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const clipEl = el && el.closest && el.closest('.clip');
+    const id = clipEl && clipEl.dataset && clipEl.dataset.clipId;
+    if (id) deleteStepById(id);
+  };
 
   const STEP_W = stepW;
   const totalW = STEP_W * TOTAL_STEPS;
@@ -1939,6 +2002,7 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   };
 
   const onRulerMouseDown = (e) => {
+    if (e.button !== 0) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const setFromX = (clientX) => {
       const x = clientX - rect.left;
@@ -2118,7 +2182,14 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
   }, [setStepW]);
 
   return (
-    <div className={"timeline tool-" + ((tool === 'paint' && modSelect) ? 'select' : tool)} ref={gridRef} onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
+    <div className={"timeline tool-" + (
+        (tool === 'paint' && rightDelete) ? 'erase' :
+        (tool === 'paint' && modSelect) ? 'select' :
+        tool
+      )}
+      ref={gridRef}
+      onMouseDown={onTimelineMouseDown}
+      onScroll={(e) => onScroll && onScroll(e.currentTarget.scrollLeft)}>
       <div className="tl-ruler" onMouseDown={onRulerMouseDown} style={{ width: totalW }}>
         {Array.from({ length: TOTAL_BARS * 4 }).map((_, i) => {
           const isBar = i % 4 === 0;
@@ -2158,15 +2229,10 @@ function Timeline({ balls, steps, playhead, setPlayhead, bpm, snapToGrid, tool, 
                     }}
                     onMouseDown={e => onMouseDownGrid(e, trackKey, e.currentTarget)}
                     onContextMenu={e => {
-                      // Paint-mode shortcut: right-click anywhere on a row
-                      // erases the clip under the cursor (if any). In other
-                      // tools, let the browser's native menu show.
-                      if (tool !== 'paint') return;
-                      e.preventDefault();
-                      const rect = e.currentTarget.getBoundingClientRect();
-                      const atStep = xToStep(e.clientX - rect.left);
-                      pushHistory && pushHistory();
-                      onErase(trackKey, atStep);
+                      // The right-mousedown handler on the timeline root
+                      // handles the actual brush-erase; here we just suppress
+                      // the browser context menu in Paint mode.
+                      if (tool === 'paint') e.preventDefault();
                     }}
                     onMouseEnter={e => {
                       if (paintDrag && tool === 'paint') {
@@ -2401,14 +2467,15 @@ function Clip({ step, STEP_W, pxPerMs, selected, overlapping, playhead, tool, on
   return (
     <div className={"clip " + (selected?'sel ':'') + (overlapping?'overlap ':'') + "tool-" + tool}
       style={{ left, width: w, cursor }}
+      data-clip-id={step.id}
       title={overlapping ? 'Overlaps another clip on this track' : undefined}
       onMouseDown={handleMouseDown}
       onContextMenu={(e) => {
-        // Paint-mode shortcut: right-click on a clip deletes it.
-        if (tool !== 'paint') return;
-        e.preventDefault();
-        e.stopPropagation();
-        onErase();
+        // The actual delete happens on right-mousedown at the Timeline
+        // level (see rightDelete in Timeline) so the same gesture can
+        // brush across multiple clips. Here we only need to suppress the
+        // browser's native context menu in Paint mode.
+        if (tool === 'paint') { e.preventDefault(); e.stopPropagation(); }
       }}
       onClick={(e) => { e.stopPropagation(); onSelect(e); }}
     >
