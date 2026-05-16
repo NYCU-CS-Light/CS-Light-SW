@@ -127,6 +127,114 @@ function sanitizeFilename(s) {
   return cleaned || 'Untitled';
 }
 
+function inferTxtTrackSide(fileName) {
+  const lower = (fileName || '').toLowerCase();
+  if (lower.includes('led0')) return 'A';
+  if (lower.includes('led1')) return 'B';
+  return null;
+}
+
+function parseFirmwareTrackRow(line) {
+  const parts = line.split(',').map((part) => part.trim());
+  if (parts.length < 10) return null;
+  const nums = parts.slice(0, 10).map((part) => Number(part));
+  if (nums.some((n) => !Number.isFinite(n))) return null;
+  return {
+    type: nums[0],
+    dur: nums[1],
+    on: nums[2],
+    off: nums[3],
+    c1: rgbToHex(nums[4], nums[5], nums[6]),
+    c2: rgbToHex(nums[7], nums[8], nums[9]),
+  };
+}
+
+function sameFirmwareRow(a, b) {
+  return a.type === b.type && a.on === b.on && a.off === b.off && a.c1 === b.c1 && a.c2 === b.c2;
+}
+
+function firmwareRowToClip(row, start, length) {
+  const base = {
+    id: cryptoId(),
+    start,
+    length,
+    color: row.c1,
+    colorB: row.c2,
+    brightness: 1,
+    rate: 1,
+  };
+  switch (row.type) {
+    case 0:
+      if (row.c1 === '#000000' && row.c2 === '#000000') return null;
+      return { ...base, command: 'color' };
+    case 1:
+      return { ...base, command: 'blink', on: row.on, off: row.off };
+    case 2:
+      return { ...base, command: 'fade' };
+    case 3:
+      return { ...base, command: 'breathe', on: row.on, off: row.off };
+    case 4:
+      return { ...base, command: 'pingpong', on: row.on, off: row.off };
+    case 5:
+    case 6:
+      return {
+        ...base,
+        command: 'restart',
+        length: Math.max(1, length),
+        color: '#000000',
+        colorB: '#000000',
+      };
+    default:
+      return { ...base, command: 'color' };
+  }
+}
+
+function parseFirmwareTrackTxt(text, bpm) {
+  const rows = (text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map(parseFirmwareTrackRow)
+    .filter(Boolean);
+
+  const stepsPerSec = (bpm / 60) * 4;
+  const clips = [];
+  let cursor = 0;
+
+  for (let i = 0; i < rows.length;) {
+    const row = rows[i];
+
+    if (row.type === 5 && rows[i + 1] && rows[i + 1].type === 6) {
+      clips.push(firmwareRowToClip(row, cursor, 1));
+      i += 2;
+      continue;
+    }
+
+    const isGap = row.type === 0 && row.c1 === '#000000' && row.c2 === '#000000';
+    if (isGap) {
+      cursor += (row.dur * stepsPerSec) / 1000;
+      i += 1;
+      continue;
+    }
+
+    let mergedDur = row.dur;
+    let j = i + 1;
+    while (j < rows.length && sameFirmwareRow(row, rows[j])) {
+      mergedDur += rows[j].dur;
+      j += 1;
+    }
+
+    const start = cursor;
+    const length = Math.max(1 / 1024, (mergedDur * stepsPerSec) / 1000);
+    cursor += length;
+    const clip = firmwareRowToClip(row, start, length);
+    if (clip) clips.push(clip);
+    i = j;
+  }
+
+  return clips;
+}
+
 function seedSteps() {
   const out = {};
   initialBalls.forEach((b) => {
@@ -525,6 +633,25 @@ function loadCalibrationTestPattern({ setBalls, setSteps, setBpm }) {
   const a = [...both.map(s => mkStep(...s)), ...splitA.map(s => mkStep(...s))];
   const b = [...both.map(s => mkStep(...s)), ...splitB.map(s => mkStep(...s))];
   setSteps({ 'CAL-A': a, 'CAL-B': b });
+}
+
+async function buildBallFromTxtPair(files, bpm) {
+  const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name));
+  const labeled = sorted.map((file) => ({ file, side: inferTxtTrackSide(file.name) }));
+  let fileA = labeled.find((item) => item.side === 'A')?.file || null;
+  let fileB = labeled.find((item) => item.side === 'B')?.file || null;
+  if (!fileA || !fileB) {
+    fileA = fileA || sorted[0];
+    fileB = fileB || sorted.find((file) => file !== fileA) || sorted[1];
+  }
+
+  const [textA, textB] = await Promise.all([fileA.text(), fileB.text()]);
+  return {
+    steps: {
+      A: parseFirmwareTrackTxt(textA, bpm),
+      B: parseFirmwareTrackTxt(textB, bpm),
+    },
+  };
 }
 
 // ============ APP ============
@@ -1352,15 +1479,44 @@ function App() {
     });
   }, []);
 
-  const addBall = () => {
+  const addBall = useCallback(() => {
     if (balls.length >= 16) return;
     pushHistory();
     const i = balls.length;
     const id = 'B' + String(i + 1).padStart(2, '0');
     const color = palette[i % palette.length].hex;
     setBalls([...balls, { id, name: 'Ball ' + String(i + 1).padStart(2, '0'), color }]);
-    setSteps(prev => ({ ...prev, [id + '-A']: [], [id + '-B']: [] }));
-  };
+    setSteps((prev) => ({ ...prev, [id + '-A']: [], [id + '-B']: [] }));
+  }, [balls, palette, pushHistory]);
+
+  const importBallTxtPair = useCallback(async (files) => {
+    const fileList = Array.from(files || []).filter(Boolean);
+    if (fileList.length !== 2) {
+      alert('Please choose exactly two .txt files: led0.txt and led1.txt.');
+      return;
+    }
+    if (projectStateRef.current.balls.length >= 16) {
+      alert('Cannot add more balls: this project already has 16 balls.');
+      return;
+    }
+    try {
+      const built = await buildBallFromTxtPair(fileList, bpm);
+      const currentBalls = projectStateRef.current.balls;
+      const nextIndex = currentBalls.length;
+      const id = 'B' + String(nextIndex + 1).padStart(2, '0');
+      const color = (projectStateRef.current.palette || palette)[nextIndex % (projectStateRef.current.palette || palette).length].hex;
+      pushHistory();
+      setBalls((prev) => [...prev, { id, name: 'Ball ' + String(nextIndex + 1).padStart(2, '0'), color }]);
+      setSteps((prev) => ({
+        ...prev,
+        [id + '-A']: built.steps.A,
+        [id + '-B']: built.steps.B,
+      }));
+    } catch (err) {
+      alert('Could not import ball sequence: ' + err.message);
+    }
+  }, [bpm, palette, pushHistory]);
+
   const removeBall = (ballId) => {
     if (balls.length <= 1) return;
     pushHistory();
@@ -1508,7 +1664,7 @@ function App() {
 
       <div className="main">
         <div className="left">
-          <TrackList balls={balls} litState={litState} onAdd={addBall} onRemove={removeBall} />
+          <TrackList balls={balls} litState={litState} onAdd={addBall} onImportTxtPair={importBallTxtPair} onRemove={removeBall} />
         </div>
 
         <div className="center">
@@ -2160,12 +2316,52 @@ function WaveformTrack({ playhead, setPlayhead, bpm, style, audio, onImport, onC
 }
 
 // ============ TRACK LIST ============
-function TrackList({ balls, litState, onAdd, onRemove }) {
+function TrackList({ balls, litState, onAdd, onImportTxtPair, onRemove }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+  const importRef = useRef(null);
+
+  useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDown = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  const runItem = (fn) => () => {
+    setMenuOpen(false);
+    if (fn) fn();
+  };
+
   return (
     <div className="tracklist">
       <div className="tl-header">
         <div className="tl-title">BALLS · {balls.length}</div>
-        <button className="tl-add" onClick={onAdd}>＋ Add</button>
+        <div className="tl-add-group" ref={menuRef}>
+          <button className="tl-add" onClick={() => setMenuOpen((v) => !v)}>＋ Add ▾</button>
+          {menuOpen && (
+            <div className="tl-add-menu">
+              <button className="tl-add-item" onClick={runItem(onAdd)}>Add empty ball</button>
+              <button className="tl-add-item" onClick={runItem(() => importRef.current && importRef.current.click())}>
+                Import two .txt files
+              </button>
+            </div>
+          )}
+          <input
+            ref={importRef}
+            type="file"
+            accept=".txt,text/plain"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const files = e.target.files ? Array.from(e.target.files) : [];
+              if (files.length && onImportTxtPair) onImportTxtPair(files);
+              e.target.value = '';
+            }}
+          />
+        </div>
       </div>
       <div className="tl-rows">
         {balls.map((b) => (

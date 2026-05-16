@@ -3,6 +3,10 @@
 ## 匯入音檔
 - 在音軌那邊按 `+ Import` 的按鈕
 
+## 匯入 ball sequence
+- 在 `BALLS` 區塊按 `＋ Add`，可以選 `Add empty ball` 或 `Import two .txt files`
+- 匯入時請選兩個 firmware 文字檔，通常是 `led0.txt` / `led1.txt`
+
 ## 工具列
 右上角的四個按鈕，括號內是鍵盤切換鍵：
 
